@@ -1,0 +1,13 @@
+# kernel artefacts: huge, and must never be committed
+vmlinux
+bzImage
+initramfs.cpio.gz
+trace.raw.txt
+qemu.log
+*.img
+*.bundle
+# credentials
+.git/credentials
+__pycache__/
+*.pyc
+.verify.js

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Linux Internals 3D — step through the hardware</title>
+<style>
+  :root{--bg:#04060a;--ink:#c9d1d9;--dim:#7b8a9c;--edge:#21262d;--grn:#7ee787}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;padding:44px 22px 70px}
+  main{max-width:1000px;margin:0 auto}
+  h1{font-size:25px;margin:0 0 6px;letter-spacing:-.4px}
+  .sub{color:var(--dim);margin-bottom:26px}
+  h2{font-size:14px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim);
+    margin:34px 0 12px;font-weight:600}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(268px,1fr))}
+  a.card{display:block;padding:16px 18px;border:1px solid var(--edge);border-radius:10px;
+    text-decoration:none;color:var(--ink);background:#0a0e13;transition:.14s}
+  a.card:hover{border-color:#3fb950;background:#0c1512;transform:translateY(-1px)}
+  a.card b{display:block;color:var(--grn);margin-bottom:5px;font-size:14.5px}
+  a.card span{color:var(--dim);font-size:12.5px}
+  .bar{display:flex;gap:10px;flex-wrap:wrap;margin:18px 0 4px}
+  .chip{border:1px solid var(--edge);border-radius:20px;padding:5px 13px;
+    font-size:12px;color:var(--dim)}
+  .chip b{color:var(--grn)}
+  code{background:#0d1117;border:1px solid var(--edge);border-radius:4px;padding:1px 5px;
+    font-size:12.5px;color:#79c0ff}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  td,th{padding:8px 10px;border-bottom:1px solid #161b22;text-align:left;vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.6px}
+  .r{color:#ffa657;font-weight:600}
+  .w{color:#79c0ff;font-weight:600}
+  .keep{color:#6e7b8a}
+  footer{margin-top:40px;color:#4d5661;font-size:12px;border-top:1px solid var(--edge);padding-top:16px}
+  a{color:#79c0ff}
+</style>
+</head>
+<body>
+<main>
+  <h1>Linux internals, in 3D</h1>
+  <div class="sub">Step a real Linux kernel one instruction at a time and watch what
+    each one does to the hardware — die blocks, memory cells and registers.</div>
+
+  <div class="bar">
+    <span class="chip">real kernel <b>v6.8.0</b></span>
+    <span class="chip">traced under <b>QEMU + GDB</b></span>
+    <span class="chip"><b>120</b> instructions</span>
+    <span class="chip"><b>0</b> unclassified</span>
+    <span class="chip">no build step, no server, no network</span>
+  </div>
+
+  <h2>Open a scene</h2>
+  <div class="grid">
+    <a class="card" href="syscall-viewer.html">
+      <b>🔄 Syscall entry — entry_SYSCALL_64</b>
+      <span>120 instructions · arch/x86/entry/entry_64.S · swapgs, PUSH_AND_CLEAR_REGS,
+        do_syscall_64, iretq</span>
+    </a>
+    <a class="card" href="sched-viewer.html">
+      <b>⏱️ Scheduler — __schedule</b>
+      <span>90 instructions · kernel/sched/core.c, fair.c, softirq.c, rcu/tiny.c</span>
+    </a>
+    <a class="card" href="scene-push.html">
+      <b>🧱 Static scene — push QWORD PTR</b>
+      <span>Single frame of the full 3D scene: die, code bytes in memory, register bank</span>
+    </a>
+  </div>
+
+  <h2>What you get per instruction</h2>
+  <table>
+    <tr><th>Layer</th><th>What it shows</th></tr>
+    <tr><td>Glyph + emoji</td><td>an SVG picture and an emoji of what the instruction
+      <em>does</em> — <code>🧱</code> stack, <code>⚖️</code> compare, <code>🔀</code>
+      branch, <code>🛡️</code> interrupts off</td></tr>
+    <tr><td>Hardware table</td><td>one row per piece of hardware with a direction:
+      <span class="r">R</span> read, <span class="w">W</span> write, <span class="keep">–</span>
+      explicitly preserved. Flags are per-bit: <code>CMP</code> writes six,
+      <code>MOV</code> writes none, <code>INC</code> leaves <code>CF</code> alone</td></tr>
+    <tr><td>3D die</td><td>the CPU blocks the ISA requires, lit green and raised</td></tr>
+    <tr><td>Memory cells</td><td>the <b>real kernel bytes at that PC</b>, read from the
+      vmlinux image. The instruction's own bytes are lit; the rest are context</td></tr>
+    <tr><td>Register bank</td><td>16 registers with live values. Registers the
+      instruction actually touches are prominent; a register that just
+      <em>changed</em> lights amber</td></tr>
+    <tr><td>Truth check</td><td>ISA claims are cross-checked against the real trace.
+      A <span class="r">conflict</span> badge fires when the ISA said "preserved" but
+      the hardware changed it anyway</td></tr>
+  </table>
+
+  <h2>Build it yourself</h2>
+  <p style="color:var(--dim);font-size:13.5px">Any kernel symbol with DWARF traces the
+    same way — the tool is not syscall-specific:</p>
+  <div style="background:#0a0e13;border:1px solid var(--edge);border-radius:8px;padding:13px 15px;font-size:12.5px;overflow:auto">
+python3 trace-kernel.py --symbol __schedule --steps 90 -o t.json<br>
+python3 build-viewer.py t.json -o sched.html
+  </div>
+
+  <footer>
+    Trace: real Linux <code>v6.8.0</code> booted in QEMU, stepped instruction by
+    instruction over the GDB stub, state sampled before every instruction.
+    Floorplan and highlighting all derive from one <code>BLOCKS</code> table, so the
+    2D map, the 3D die and the hardware table cannot disagree.
+  </footer>
+</main>
+</body>
+</html>
