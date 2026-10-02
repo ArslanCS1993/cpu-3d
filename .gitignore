@@ -6,6 +6,10 @@ trace.raw.txt
 qemu.log
 *.img
 *.bundle
+# raw trace dumps: large, and already embedded inside the generated HTML
+trace.json
+trace-sched.json
+*.trace.json
 # credentials
 .git/credentials
 __pycache__/

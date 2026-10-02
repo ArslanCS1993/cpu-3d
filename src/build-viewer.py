@@ -115,6 +115,10 @@ def build(trace, vmlinux):
         s["sem"] = x86sem.classify(dis_text or text)
         s["hwt"] = x86sem.hw_table(dis_text or text)["rows"]
         s["file_short"] = short(s.get("file"))
+        # Which instruction owns each byte of the fetch window. Computed here so
+        # clicking a memory cell selects a real instruction instead of guessing
+        # from the length of the one at PC.
+        s["code_map"] = []
         s["cpl"] = r.get("cs", 0) & 3
         # hex strings everywhere: JS numbers cannot hold these
         s["regs_h"] = {k: H(v) for k, v in r.items()}
@@ -124,6 +128,25 @@ def build(trace, vmlinux):
                             for d in s.get("mem_delta", [])]
         # NB: never store a back-reference to the neighbouring step here -
         # it chains the objects and json.dumps expands it exponentially.
+    # Byte -> step index for every fetch window. `nearest` keeps the most
+    # recent occurrence of an address, so a loop body maps to the iteration
+    # actually on screen rather than the first time through.
+    nearest = {}
+    for i, s in enumerate(steps):
+        base = int(s["insn_parsed"]["addr"], 16)
+        win = s["code"]["bytes"]
+        # Register the start BEFORE filling, so the instruction at PC owns its
+        # own bytes. Ownership then runs forward to the end of the window: a
+        # byte in the middle of a multi-byte encoding belongs to the
+        # instruction that STARTED there, which is not itself a start address.
+        nearest[base] = i
+        owner, cm = -1, []
+        for off in range(len(win)):
+            a = base + off
+            if a in nearest:
+                owner = nearest[a]
+            cm.append(owner)
+        s["code_map"] = cm
     return trace
 
 
@@ -153,7 +176,13 @@ HTML = r"""<!DOCTYPE html>
   button:hover{border-color:var(--accent);color:#fff}
   main{display:grid;grid-template-columns:minmax(440px,45%) 1fr;
        height:calc(100vh - 46px)}
-  #list{border-right:1px solid var(--edge);overflow-y:auto;background:var(--panel)}
+  #left{display:flex;flex-direction:column;min-height:0;min-width:0}
+  #tabs{display:flex;gap:4px;padding:6px 8px;background:var(--panel);
+        border-bottom:1px solid var(--edge);flex:0 0 auto}
+  #tabs button{flex:1;font-size:11px;padding:4px 6px}
+  #tabs button.on{border-color:var(--accent);color:#fff;background:#1b2735}
+  #list{border-right:1px solid var(--edge);overflow-y:auto;background:var(--panel);
+        flex:1 1 auto;min-height:0}
   /* flex item that must both grow AND scroll: without min-height:0 a flex
      child refuses to shrink below its content and the pane is squeezed */
   #detail{overflow-y:auto;padding:0 18px 60px;flex:1 1 auto;min-height:0}
@@ -165,6 +194,12 @@ HTML = r"""<!DOCTYPE html>
   .row.sel .n{color:var(--accent)}
   .row .a{color:#6e7681;min-width:84px;font-size:11px}
   .row .i{color:var(--code)}
+  .gap{color:#4d5566;background:#0b0f14;padding:2px 10px;font-size:10px;
+       text-align:center;font-style:italic;border-left:2px solid #21262d}
+  .gap.overlap{color:var(--warn);border-left-color:var(--warn)}
+  /* address mode puts the address first and the step number last */
+  #list .row .a{flex:0 0 84px}
+  #list .row .n{margin-left:auto;min-width:26px}
   .row.wrote{background:#101a14}
   .row.wrote.sel{background:#16301f}
   .row.jumped{border-left-color:var(--warn)}
@@ -294,10 +329,12 @@ HTML = r"""<!DOCTYPE html>
     color:#8b98a8;background:rgba(4,6,10,.72);padding:4px 8px;border-radius:5px;
     pointer-events:none;line-height:1.7}
   .die3dlegend b{color:#7ee787}
-  #die3dreset{position:absolute;right:10px;top:9px;font:11px ui-monospace,monospace;
+  #die3dreset,#die3dcode{position:absolute;top:9px;font:11px ui-monospace,monospace;
     color:#8b98a8;background:rgba(4,6,10,.72);border:1px solid var(--edge);
     border-radius:5px;padding:4px 9px;cursor:pointer;z-index:3}
-  #die3dreset:hover{color:#c9d1d9;border-color:#3d4753}
+  #die3dreset{right:10px}
+  #die3dcode{right:96px}
+  #die3dreset:hover,#die3dcode:hover{color:#c9d1d9;border-color:#3d4753}
   #die3dpick{margin-top:9px;font:12px ui-monospace,monospace;color:#8b98a8;
     min-height:17px}
   #die3dpick b{color:#79c0ff}
@@ -331,7 +368,13 @@ HTML = r"""<!DOCTYPE html>
   </div>
 </header>
 <main>
-  <div id="list"></div>
+  <div id="left">
+    <div id="tabs">
+      <button id="tab-exec" class="on">execution order</button>
+      <button id="tab-addr">by address in memory</button>
+    </div>
+    <div id="list"></div>
+  </div>
   <div id="right">
     <div id="detail"></div>
     <div id="die3dhost"></div>
@@ -359,7 +402,55 @@ function val(h){
 }
 
 /* ---------------- instruction list ---------------- */
-function buildList(){
+/* Instructions sorted by ADDRESS, i.e. how the code lies in memory rather
+   than how the CPU walked it. Gaps between runs are marked, because the jump
+   from one function to the next is the thing this view exists to show. */
+let MEMORDER = [];
+function buildMemMap(){
+  MEMORDER = T.steps.map((s,i)=>i)
+    .sort((a,b)=> BigInt(T.steps[a].insn_parsed.addr) < BigInt(T.steps[b].insn_parsed.addr) ? -1
+            : BigInt(T.steps[a].insn_parsed.addr) > BigInt(T.steps[b].insn_parsed.addr) ? 1
+            : a-b);
+  let html = '', lastAddr = null, lastFile = null;
+  MEMORDER.forEach((i,k)=>{
+    const s = T.steps[i], sem = s.sem || {}, a = s.insn_parsed.addr;
+    if(lastAddr !== null){
+      const prev = T.steps[MEMORDER[k-1]].insn_parsed.addr;
+      const gap = BigInt(a) - BigInt(prev) - BigInt(s.insn_parsed.length);
+      if(gap > 0n)
+        html += `<div class="gap">&mdash; ${gap.toString()} bytes not in this trace &mdash;</div>`;
+      else if(gap < 0n)
+        html += `<div class="gap overlap">&#8617; back to an earlier address</div>`;
+    }
+    const key = s.file_short+':'+s.line;
+    if(key !== lastFile && s.file_short !== lastFile){
+      html += `<div class="srcgrp">${esc(s.file_short)}</div>`; lastFile = s.file_short;
+    }
+    const cat = [ sem.is_mem?'mem':'',
+                  ['stack'].includes(sem.glyph)?'stackop':'',
+                  ['jump','branch','call','ret'].includes(sem.glyph)?'branch':'' ]
+                .filter(Boolean).join(' ');
+    html += `<div class="row ${cat}" data-i="${i}" id="arow-${i}"
+        title="${esc(sem.caption||key)}">
+      <span class="a">${esc(a.replace('0x','').slice(-10))}</span>
+      <span class="g">${svgOf(sem.glyph)}</span><span class="emo">${sem.emoji||''}</span>
+      <span class="i">${esc(s.insn_parsed.text)}</span>
+      <span class="n">${i}</span></div>`;
+    lastAddr = a;
+  });
+  return html;
+}
+
+function showList(){
+  const addrMode = document.getElementById('tab-addr').classList.contains('on');
+  const L = document.getElementById('list');
+  L.innerHTML = addrMode ? buildMemMap() : execListHTML();
+  L.querySelectorAll('.row').forEach(r => r.onclick = () => select(+r.dataset.i));
+}
+
+function buildList(){ showList(); }
+
+function execListHTML(){
   let html = '', last = null;
   T.steps.forEach((s,i)=>{
     const key = s.file_short+':'+s.line;
@@ -385,9 +476,7 @@ function buildList(){
       <span class="a">${esc(s.insn_parsed.addr.replace('0x','').slice(-10))}</span>
       <span class="i">${esc(s.insn_parsed.text)}</span></div>`;
   });
-  const L = document.getElementById('list');
-  L.innerHTML = html;
-  L.querySelectorAll('.row').forEach(r => r.onclick = () => select(+r.dataset.i));
+  return html;
 }
 
 /* ---------------- per-instruction effect ---------------- */
@@ -553,6 +642,7 @@ function dieMount(sem){
           information.</div>
         <div class="die3dlegend"></div>
         <button id="die3dreset">reset view</button>
+        <button id="die3dcode">zoom to memory</button>
       </div>
       <div id="die3dpick"></div>`;
   }
@@ -587,6 +677,24 @@ function dieMount(sem){
         : '';
     };
     document.getElementById('die3dreset').addEventListener('click', () => DIE.reset());
+    document.getElementById('die3dcode').addEventListener('click', () => DIE.focusCode());
+    /* Clicking a memory cell selects the instruction that owns that byte, so
+       you can navigate by pointing at code in memory rather than reading a
+       list. code_map is built from the trace, so it is a real ownership
+       relation, not a guess from the length of the instruction at PC. */
+    DIE.onCell = k => {
+      const box = document.getElementById('die3dpick');
+      const st = T.steps[cur];
+      const owner = st && st.code_map ? st.code_map[k] : -1;
+      if (box) {
+        box.innerHTML = k < 0 ? ''
+          : `byte <b>+${k}</b> of the window at <b>${esc(st.code.base)}</b>`
+            + (owner >= 0
+                ? ` &mdash; belongs to step <b>${owner}</b>: ${esc(T.steps[owner].insn_parsed.text)}`
+                : ' &mdash; no instruction in this trace starts here');
+      }
+      if (owner >= 0 && owner !== cur) select(owner);
+    };
     window.addEventListener('resize', () => DIE.render());
     DIE.render();
   } catch (e) {
@@ -760,7 +868,8 @@ function why(d, sem){
 function select(i){
   cur = Math.max(0, Math.min(T.steps.length-1, i));
   document.querySelectorAll('.row').forEach(r=>r.classList.remove('sel'));
-  const el = document.getElementById('row-'+cur);
+  // two row id schemes: execution mode uses row-N, address mode arow-N
+  const el = document.getElementById('row-'+cur) || document.getElementById('arow-'+cur);
   if(el){ el.classList.add('sel'); el.scrollIntoView({block:'nearest'}); }
   render();
 }
@@ -772,6 +881,16 @@ document.getElementById('prev').onclick  = ()=>select(cur-1);
 document.getElementById('next').onclick  = ()=>select(cur+1);
 document.getElementById('first').onclick = ()=>select(0);
 document.getElementById('last').onclick  = ()=>select(T.steps.length-1);
+document.getElementById('tab-exec').onclick = () => {
+  document.getElementById('tab-exec').classList.add('on');
+  document.getElementById('tab-addr').classList.remove('on');
+  showList(); select(cur);
+};
+document.getElementById('tab-addr').onclick = () => {
+  document.getElementById('tab-addr').classList.add('on');
+  document.getElementById('tab-exec').classList.remove('on');
+  showList(); select(cur);
+};
 document.addEventListener('keydown', e=>{
   if(e.key==='ArrowDown'||e.key==='j'){select(cur+1);e.preventDefault();}
   if(e.key==='ArrowUp'  ||e.key==='k'){select(cur-1);e.preventDefault();}
@@ -815,6 +934,23 @@ def _verify_js(outp):
     os.unlink(tmp)
     if r.returncode != 0:
         sys.exit("[verify] generated page has a JS syntax error:\n" + r.stderr[:1200])
+
+    # node --check cannot see a ReferenceError. Renaming buildList() while
+    # leaving its call behind shipped a page whose instruction list was simply
+    # EMPTY, with the browser reporting only empty-message exceptions. So
+    # assert the entry points are actually defined, not merely parseable.
+    src = m.group(1)
+    required = ["buildList", "showList", "execListHTML", "buildMemMap",
+                "select", "render", "diffs", "hwtTable", "dieMount", "svgOf", "esc"]
+    # a binding counts as defined whether it is a declaration or a const arrow
+    defs = {f: (re.search(r'function\s+%s\s*\(' % re.escape(f), src)
+                or re.search(r'\b(?:const|let|var)\s+%s\s*=' % re.escape(f), src))
+            for f in required}
+    missing = [f for f, d in defs.items() if not d]
+    if missing:
+        sys.exit("[verify] page script calls but never defines: %s\n"
+                 "         (a missing definition is a runtime ReferenceError, which "
+                 "node --check cannot detect)" % ", ".join(missing))
     return True
 
 

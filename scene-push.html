@@ -180,6 +180,7 @@ const GEO = Object.fromEntries(BLOCKS.map(b=>[b[0],{x:b[3],y:b[4],w:b[5],h:b[6]}
     this.labels = labels || {};     // {id: "Fetch"}
     this.hot = new Set();
     this.picked = null;
+    this.pickedCell = -1;
     this.yaw = -0.44; this.pitch = 0.66; this.dist = 20.5;
     this.target = [8.2, -4.3, 0.0];
     this.SCALE = 0.012;
@@ -307,6 +308,26 @@ const GEO = Object.fromEntries(BLOCKS.map(b=>[b[0],{x:b[3],y:b[4],w:b[5],h:b[6]}
   Die3D.prototype._pick = function (e) {
     const r = this.canvas.getBoundingClientRect();
     const mx = e.clientX - r.left, my = e.clientY - r.top;
+
+    // Memory cells are checked first: they sit below the die, but when the
+    // camera is tilted down they can overlap a block, and a byte is a smaller
+    // target the user aims at more deliberately than a block.
+    const cv = this._projectCells();
+    if (cv) {
+      for (const k of Object.keys(cv)) {
+        const p = cv[k];
+        if (mx >= p.x0 && mx <= p.x1 && my >= p.y0 && my <= p.y1) {
+          this.pickedCell = +k;
+          this.picked = null;
+          if (this.onCell) this.onCell(+k);
+          this.render();
+          return;
+        }
+      }
+    }
+    this.pickedCell = -1;
+    if (this.onCell) this.onCell(-1);
+
     let best = null, bestD = 1e9;
     const vp = this._projectAll();
     this.ids.forEach(id => {
@@ -332,32 +353,58 @@ const GEO = Object.fromEntries(BLOCKS.map(b=>[b[0],{x:b[3],y:b[4],w:b[5],h:b[6]}
     ];
   };
 
+  // Project one axis-aligned world box to a screen-space rect. Shared by the
+  // block picker and the memory-cell picker: two copies of this arithmetic
+  // would drift, and a cell that misses its cube looks like a dead target.
+  Die3D.prototype._projBox = function (bx, by, bw, bh, z, scale, neg) {
+    const m = this._lastVP, cv = this.canvas;
+    if (!m) return null;
+    const s = scale === undefined ? this.SCALE : scale;
+    const fy = neg === undefined ? -1 : neg;   // -1: screen-up, +1: screen-down
+    let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+    for (const [dx, dy] of [[0, 0], [bw, 0], [bw, bh], [0, bh]]) {
+      const wx = (bx + dx) * s;
+      const wy = fy * (by + dy) * s;
+      const cx = m[0] * wx + m[4] * wy + m[8] * z + m[12];
+      const cy = m[1] * wx + m[5] * wy + m[9] * z + m[13];
+      const cw = m[3] * wx + m[7] * wy + m[11] * z + m[15];
+      if (cw <= 0) return null;
+      const sx = (cx / cw * 0.5 + 0.5) * cv.width;
+      const sy = (1 - (cy / cw * 0.5 + 0.5)) * cv.height;
+      x0 = Math.min(x0, sx); x1 = Math.max(x1, sx);
+      y0 = Math.min(y0, sy); y1 = Math.max(y1, sy);
+    }
+    return {x0, x1, y0, y1};
+  };
+
+  // Screen rect for every byte-cell, keyed by byte offset. Cells are already in
+  // world units (unlike the floorplan's 0..1000), so scale=1 and the y axis is
+  // NOT negated - get either wrong and all 24 cells collapse onto one point.
+  Die3D.prototype._projectCells = function () {
+    const out = {};
+    if (!this.code || !this._lastVP) return out;
+    const n = this.code.bytes.length;
+    for (let i = 0; i < n; i++) {
+      const inPC = i < this.codePCLen;
+      const z = this.CELL_Z * (inPC ? 1.5 : 1.0);
+      const [cx, cy] = this._cellPos(i);
+      const p = this._projBox(cx - this.CELL * 0.31, cy - this.CELL * 0.5,
+                              this.CELL * 0.62, this.CELL, z, 1, 1);
+      if (p) out[i] = p;
+    }
+    return out;
+  };
+
   // project every block's top face to screen space, for picking
   Die3D.prototype._projectAll = function () {
-    const gl = this.gl, vp = {};
-    const eye = this._eye();
-    if (!this._lastVP) return vp;
-    const cv = this.canvas;
+    const vp = {};
     for (const id of this.ids) {
       const b = this.geo[id];
       if (!b) continue;
       const hot = this.hot.has(id);
       const z = (hot ? this.HOT_H : this.BLOCK_H);
-      let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9, ok = true;
-      for (const [dx, dy] of [[0, 0], [b.w, 0], [b.w, b.h], [0, b.h]]) {
-        const wx = b.x * this.SCALE + dx * this.SCALE;
-        const wy = -(b.y * this.SCALE + dy * this.SCALE);
-        const m = this._lastVP;
-        const cx = m[0] * wx + m[4] * wy + m[8] * z + m[12];
-        const cy = m[1] * wx + m[5] * wy + m[9] * z + m[13];
-        const cw = m[3] * wx + m[7] * wy + m[11] * z + m[15];
-        if (cw <= 0) { ok = false; break; }
-        const sx = (cx / cw * 0.5 + 0.5) * cv.width;
-        const sy = (1 - (cy / cw * 0.5 + 0.5)) * cv.height;
-        x0 = Math.min(x0, sx); x1 = Math.max(x1, sx);
-        y0 = Math.min(y0, sy); y1 = Math.max(y1, sy);
-      }
-      if (ok) vp[id] = {x0, x1, y0, y1};
+      const p = this._projBox(b.x, b.y, b.w, b.h, z);
+      if (p) vp[id] = p;
     }
     return vp;
   };
@@ -400,7 +447,25 @@ const GEO = Object.fromEntries(BLOCKS.map(b=>[b[0],{x:b[3],y:b[4],w:b[5],h:b[6]}
 
   Die3D.prototype.reset = function () {
     this.yaw = -0.44; this.pitch = 0.66; this.dist = 20.5; this.picked = null;
+    this.pickedCell = -1;
+    this.target = [8.2, -4.3, 0.0];
     this.code = null; this.codePCLen = 0; this.regChanged = new Set();
+    this.render();
+  };
+
+  /* Fly the camera down to the byte strip. At the framing that shows the whole
+     die, a cell is ~6px across, which is not a click target on a phone - and
+     clicking the cells is the whole point of putting code in memory. */
+  Die3D.prototype.focusCode = function () {
+    const n = this.code && this.code.bytes.length ? this.code.bytes.length : 24;
+    const pitch = this.CELL + this.CELL_GAP;
+    const cx = this.CODE_X0 + (n / 2) * pitch * 0.62;
+    this.target = [cx, this.CODE_Y, 0];
+    /* dist/pitch measured against the real canvas: 3.4/0.7 puts every one of
+       the 24 cells on screen at ~30x21px. Lower pitch looks flatter but makes
+       cells 3px tall, which is useless as a touch target. */
+    this.dist = 3.4;
+    this.pitch = 0.7;
     this.render();
   };
 
@@ -479,11 +544,17 @@ const GEO = Object.fromEntries(BLOCKS.map(b=>[b[0],{x:b[3],y:b[4],w:b[5],h:b[6]}
       const b = this.code.bytes[i];
       const [x, y] = this._cellPos(i);
       const inPC = i < this.codePCLen;
+      const sel = i === this.pickedCell;
       modelMatrix(this.mModel, x, y, this.CELL_Z / 2,
-                  this.CELL * 0.62, this.CELL, inPC ? this.CELL_Z * 1.5 : this.CELL_Z);
+                  this.CELL * 0.62, this.CELL,
+                  sel ? this.CELL_Z * 2.1 : (inPC ? this.CELL_Z * 1.5 : this.CELL_Z));
       gl.uniformMatrix4fv(this.u.model, false, this.mModel);
       this._setNrmRot(this.CELL * 0.62, this.CELL, this.CELL_Z);
-      if (inPC) {
+      if (sel) {
+        // the byte you clicked: amber, tallest, unmistakable against the green
+        gl.uniform3f(this.u.color, 1.0, 0.68, 0.15);
+        gl.uniform1f(this.u.emis, 0.40);
+      } else if (inPC) {
         gl.uniform3f(this.u.color, 0.30, 0.95, 0.50);
         gl.uniform1f(this.u.emis, 0.34);
       } else {
