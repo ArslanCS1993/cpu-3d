@@ -10,7 +10,10 @@ sampled **before** every instruction.
 
 ## Live demo
 
-<https://skyson-linux3d.github.io/cpu-3d/> — or open `index.html` locally.
+<https://ArslanCS1993.github.io/cpu-3d/> — or open `index.html` locally.
+
+Served by GitHub Pages straight from `main`. The pages are self-contained: no
+build step, no CDN, no network access needed at view time.
 
 ## What you get per instruction
 
