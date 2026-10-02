@@ -10,21 +10,21 @@ permissions:
   pages: write
   id-token: write
 
-# Allow this workflow to switch Pages on for the repository itself,
-# using the automatic GITHUB_TOKEN. No personal access token required.
+# NOTE: Pages must be switched on once, by hand, in the repo's
+# Settings -> Pages -> Source -> "Deploy from a branch" -> main / (root).
+# Enabling it here via actions/configure-pages requires a token with repo
+# admin scope, which this setup deliberately avoids. Everything after that
+# single switch is handled automatically by the steps below.
 jobs:
   deploy:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    concurrency:
+      group: pages
+      cancel-in-progress: true
     steps:
-      - name: Enable Pages for this repository
-        id: enable
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
-
       - name: Check out repository
         uses: actions/checkout@v4
 
