@@ -33,6 +33,84 @@ def short(path):
     return m.group(1) if m else (path or "?")
 
 
+# ------------------------------------------------------- real source context
+# The kernel tree this vmlinux was built from is still on disk, so read the
+# surrounding lines at BUILD time and embed them - the page must stay
+# dependency-free and work from file://, so it cannot fetch anything at
+# runtime.
+#
+# TWO roots are trusted, because DWARF records both:
+#   KSRC  the source tree            arch/x86/entry/common.c
+#   KOBJ  the build output directory /tmp/kobj64/./arch/x86/.../syscalls_64.h
+# The generated syscall table is a REAL file the kernel was compiled from, and
+# step 61 of the syscall trace lands in it. With only KSRC trusted that step
+# had no source text at all.
+KSRC = os.environ.get("KSRC", "/tmp/ksrc64/linux-source-6.8.0")
+KOBJ = os.environ.get("KOBJ", "/tmp/kobj64")
+
+CTX_BEFORE, CTX_AFTER = 22, 10   # lines of real context around the hot line
+
+
+def _roots():
+    out = []
+    for r in (KSRC, KOBJ):
+        if r and os.path.isdir(r):
+            out.append(os.path.realpath(r))
+    return out
+
+
+def source_file(abs_path):
+    """Resolve a DWARF file path to a readable file, or None.
+
+    DWARF records the path the kernel was COMPILED with, which need not exist
+    on this machine. Only trust a file that really is inside a known build
+    root, so a stale or hostile path in a trace cannot make the build read
+    something outside the kernel tree - e.g. /etc/shadow.
+    """
+    if not abs_path or not os.path.isabs(abs_path):
+        return None
+    ap = os.path.realpath(abs_path)
+    for root in _roots():
+        if ap.startswith(root + os.sep) and os.path.isfile(ap):
+            return ap
+    return None
+
+
+
+class SourceCache:
+    """Read a source file once, slice context windows out of it."""
+    def __init__(self):
+        self.files = {}
+        self.missing = set()
+
+    def lines(self, abs_path):
+        if abs_path in self.files:
+            return self.files[abs_path]
+        if abs_path in self.missing:
+            return None
+        real = source_file(abs_path)
+        if real is None:
+            self.missing.add(abs_path)
+            return None
+        try:
+            with open(real, "r", errors="replace") as f:
+                data = f.read().splitlines()
+        except OSError:
+            self.missing.add(abs_path)
+            return None
+        self.files[abs_path] = data
+        return data
+
+    def window(self, abs_path, line):
+        """[(lineno, text)] around `line`, 1-indexed, clipped to the file."""
+        data = self.lines(abs_path)
+        if not data or not line or line < 1:
+            return []
+        lo = max(1, line - CTX_BEFORE)
+        hi = min(len(data), line + CTX_AFTER)
+        return [[n, data[n - 1]] for n in range(lo, hi + 1)]
+
+
 # ---------------------------------------------------------------- ELF access
 def elf_segments(path):
     """[(vaddr, filesz, file_off)] for every PT_LOAD, so we can read raw bytes."""
@@ -87,6 +165,10 @@ def build(trace, vmlinux):
     steps = trace["steps"]
     segs = elf_segments(vmlinux)
     cache = {}
+    src = SourceCache()
+    # Window keyed by (file, line): a function body is visited by many steps,
+    # and re-emitting identical line lists per step is pure page weight.
+    win_cache = {}
 
     for i, s in enumerate(steps):
         r = s["regs"]
@@ -115,6 +197,13 @@ def build(trace, vmlinux):
         s["sem"] = x86sem.classify(dis_text or text)
         s["hwt"] = x86sem.hw_table(dis_text or text)["rows"]
         s["file_short"] = short(s.get("file"))
+        # Real source context around this step's line, and which OTHER lines of
+        # this trace also execute - so the reader can see "we are 4 steps into
+        # this statement" rather than just a bare line number.
+        wk = (s.get("file"), s.get("line"))
+        if wk not in win_cache:
+            win_cache[wk] = src.window(s.get("file"), s.get("line"))
+        s["src_ctx"] = win_cache[wk]
         # Which instruction owns each byte of the fetch window. Computed here so
         # clicking a memory cell selects a real instruction instead of guessing
         # from the length of the one at PC.
@@ -147,6 +236,13 @@ def build(trace, vmlinux):
                 owner = nearest[a]
             cm.append(owner)
         s["code_map"] = cm
+    # Every source line this trace actually executes, per file. Marking those in
+    # the source pane turns it from a code browser into a map of the real path:
+    # the grey lines were compiled but never ran, the marked ones did.
+    traced = {}
+    for s in steps:
+        traced.setdefault(s["file_short"], set()).add(s["line"])
+    trace["src_traced"] = {k: sorted(v) for k, v in traced.items()}
     return trace
 
 
@@ -174,7 +270,15 @@ HTML = r"""<!DOCTYPE html>
   button{background:var(--panel2);color:var(--fg);border:1px solid var(--edge);
          border-radius:5px;padding:5px 10px;cursor:pointer;font:inherit;font-size:12px}
   button:hover{border-color:var(--accent);color:#fff}
-  main{display:grid;grid-template-columns:minmax(280px,23%) minmax(320px,1fr) minmax(400px,38%);
+  main{display:grid;
+       grid-template-columns:minmax(240px,20%) minmax(280px,1fr) minmax(340px,30%) minmax(320px,28%);
+       /* grid-template-rows is NOT optional here. An implicit row is `auto`,
+          so it grows to fit its tallest item and overflows the container:
+          measured, the source pane was 827px tall inside a 577px viewport,
+          which meant it never scrolled internally and the hot line simply
+          fell below the window. minmax(0,1fr) pins the row to the container
+          height so every column scrolls on its own. */
+       grid-template-rows:minmax(0,1fr);
        height:calc(100vh - 46px)}
   #left{display:flex;flex-direction:column;min-height:0;min-width:0}
   #tabs{display:flex;gap:4px;padding:6px 8px;background:var(--panel);
@@ -188,11 +292,44 @@ HTML = r"""<!DOCTYPE html>
   #detail{overflow-y:auto;padding:0 18px 60px;min-height:0}
   #hw{overflow-y:auto;padding:0 18px 60px;min-height:0;
       border-left:1px solid var(--edge);background:#0b0f14}
+  /* --- the C source pane (right-most) --- */
+  #src{overflow-y:auto;min-height:0;min-width:0;background:#0a0d12;
+       border-left:1px solid var(--edge);display:flex;flex-direction:column}
+  #srchead{flex:0 0 auto;padding:7px 12px;background:var(--panel);
+           border-bottom:1px solid var(--edge)}
+  #srchead .f{color:var(--fg);font-size:12px;font-weight:600;
+             overflow-wrap:anywhere}
+  #srchead .m{color:var(--dim);font-size:11px;margin-top:2px}
+  /* min-height:0 is load-bearing, same rule as #list and #detail: a flex item
+     with min-height:auto refuses to shrink below its content, so the pane
+     stayed 827px tall inside a 531px column and the header scrolled away
+     with it. With it, #srchead stays pinned and only the lines scroll. */
+  #srclines{flex:1 1 auto;min-height:0;overflow-y:auto;
+            padding:6px 0 40px;font-size:12px;line-height:1.55}
+  /* Hanging indent on the text, not the row: kernel lines routinely exceed the
+     column, and without this a wrapped line's tail starts under the line
+     numbers - it reads as a new line of code that is not there. Real git
+     browsers use the same trick. */
+  .sl{display:flex;gap:9px;padding:0 12px 0 0;white-space:pre-wrap;
+      word-break:break-word}
+  .sl .n{color:#39424e;text-align:right;min-width:46px;user-select:none;
+         font-size:11px;flex:0 0 auto}
+  .sl .t{color:#8b98a8;flex:1 1 auto;min-width:0;
+         padding-left:14px;text-indent:-14px}
+  /* a line this trace actually executed */
+  .sl.hit .t{color:#c9d1d9}
+  .sl.hit .n{color:#4e9a68}
+  .sl.hit{background:rgba(46,160,67,.05)}
+  /* the exact line the current instruction came from */
+  .sl.cur{background:#12351f}
+  .sl.cur .t{color:#fff;font-weight:600}
+  .sl.cur .n{color:#7ee787;font-weight:700}
   /* narrow window: one column, each pane scrolls on its own */
   @media (max-width:1020px){
     main{grid-template-columns:1fr;height:auto;max-height:calc(100vh - 46px)}
     #list,#detail,#hw{max-height:calc(100vh - 92px)}
-    #hw{border-left:0;border-top:1px solid var(--edge)}
+    #hw,#src{border-left:0;border-top:1px solid var(--edge)}
+    #src{max-height:calc(100vh - 92px)}
   }
   .row{display:flex;gap:8px;padding:2px 10px;cursor:pointer;
        border-left:3px solid transparent;white-space:nowrap;align-items:baseline}
@@ -400,6 +537,11 @@ HTML = r"""<!DOCTYPE html>
   </div>
   <div id="detail"></div>
   <div id="hw"></div>
+  <div id="src">
+    <div id="srchead"><div class="f" id="src-file">&mdash;</div>
+      <div class="m" id="src-meta"></div></div>
+    <div id="srclines"></div>
+  </div>
 </main>
 
 <!-- the 3D die is an overlay, hidden until the header button asks for it -->
@@ -907,6 +1049,7 @@ function render(){
 
   document.getElementById('detail').innerHTML = h;
   document.getElementById('hw').innerHTML = g;
+  srcPane(s);
   const hw3d = document.getElementById('hw-3d');
   if (hw3d) hw3d.onclick = () => dieToggle();
   dieMount(sem);
@@ -955,6 +1098,61 @@ function why(d, sem){
   return b.join(' ');
 }
 
+/* ---------------- the C source pane (right-most) ----------------
+   The real kernel text around the line this instruction came from, read
+   from the build tree at BUILD time. Three tiers of marking:
+     plain   compiled into the kernel, never executed by this trace
+     .hit    this trace DID execute this line
+     .cur    the exact line the selected instruction came from
+   Without .hit the pane is a code browser; with it, it is a map of the real
+   execution path through the source. */
+const SRCTRACED = T.src_traced || {};
+function srcPane(s){
+  const lines = s.src_ctx || [];
+  const head = document.getElementById('src-file');
+  const meta = document.getElementById('src-meta');
+  const body = document.getElementById('srclines');
+  if (!head || !body) return;
+
+  if(!lines.length){
+    head.textContent = s.file_short;
+    meta.innerHTML = 'no source text available for this file'
+      + (/\.S$/.test(s.file_short) ? ' (assembly)' : '');
+    body.innerHTML = '';
+    return;
+  }
+  head.textContent = s.file_short;
+  const hits = SRCTRACED[s.file_short] || [];
+  const hitSet = new Set(hits);
+  const nHits = lines.filter(([n]) => hitSet.has(n)).length;
+  const nWin = lines.length;
+  meta.innerHTML = `line <b style="color:var(--code)">${s.line}</b>`
+    + ` &nbsp;&middot;&nbsp; ${nWin} lines shown`
+    + ` &nbsp;&middot;&nbsp; <b style="color:#4e9a68">${nHits}</b> executed here`
+    + ` &nbsp;&middot;&nbsp; <kbd>/</kbd> jump to line`;
+
+  body.innerHTML = lines.map(([n, txt]) => {
+    const hit = hitSet.has(n), cur = n === s.line;
+    return `<div class="sl${hit?' hit':''}${cur?' cur':''}" data-ln="${n}">`
+      + `<span class="n">${n}</span>`
+      + `<span class="t">${esc(txt || ' ')}</span></div>`;
+  }).join('');
+
+  /* keep the current line in view without yanking the pane on every step.
+     Measure with getBoundingClientRect, NOT offsetTop: offsetTop is relative
+     to the nearest POSITIONED ancestor, and neither #src nor #srclines is
+     positioned, so the offset was measured against the page and the hot line
+     stayed below the fold - measured, the header said line 633 while the
+     visible window started at 611. */
+  const cur = body.querySelector('.sl.cur');
+  if (cur) {
+    const host = body.getBoundingClientRect();
+    const r = cur.getBoundingClientRect();
+    if (r.top < host.top + 8 || r.bottom > host.bottom - 8)
+      body.scrollTop += (r.top - host.top) - body.clientHeight / 2 + r.height;
+  }
+}
+
 function select(i){
   cur = Math.max(0, Math.min(T.steps.length-1, i));
   document.querySelectorAll('.row').forEach(r=>r.classList.remove('sel'));
@@ -970,6 +1168,24 @@ document.getElementById('m-kernel').textContent = T.meta.kernel;
 document.getElementById('prev').onclick  = ()=>select(cur-1);
 document.getElementById('next').onclick  = ()=>select(cur+1);
 document.getElementById('die-toggle').onclick = () => dieToggle();
+/* Click a line in the source pane to jump to an instruction that came from
+   it. Only lines this trace actually executed are targets, so this cannot
+   land on a line with no trace - and if several steps share a line, take the
+   nearest one at or after the current step so repeated clicks walk forward
+   through the loop rather than sticking. */
+document.getElementById('srclines').addEventListener('click', e => {
+  const row = e.target.closest('.sl.hit');
+  if (!row) return;
+  const ln = +row.dataset.ln;
+  const f = T.steps[cur].file_short;
+  const cand = [];
+  T.steps.forEach((st, i) => {
+    if (st.file_short === f && st.line === ln) cand.push(i);
+  });
+  if (!cand.length) return;
+  const ahead = cand.find(i => i >= cur);
+  select(ahead === undefined ? cand[0] : ahead);
+});
 document.getElementById('first').onclick = ()=>select(0);
 document.getElementById('last').onclick  = ()=>select(T.steps.length-1);
 document.getElementById('tab-exec').onclick = () => {
@@ -988,6 +1204,22 @@ document.addEventListener('keydown', e=>{
   if(e.key==='Home'){select(0);e.preventDefault();}
   if(e.key==='End') {select(T.steps.length-1);e.preventDefault();}
   if(e.key==='d'||e.key==='D'){dieToggle();e.preventDefault();}
+  if(e.key==='/'){                                        // jump to line
+    e.preventDefault();
+    const raw = prompt('Go to source line in ' + T.steps[cur].file_short + ':',
+                       String(T.steps[cur].line));
+    if(raw === null) return;
+    const ln = parseInt(raw, 10);
+    if(!Number.isFinite(ln)) return;
+    const cand = [];
+    T.steps.forEach((st, i) => {
+      if (st.file_short === T.steps[cur].file_short && st.line === ln) cand.push(i);
+    });
+    if(!cand.length){ alert('No traced instruction comes from line ' + ln
+      + ' of this file.'); return; }
+    select(cand.find(i => i >= cur) === undefined ? cand[0]
+                                              : cand.find(i => i >= cur));
+  }
 });
 /* remembered panel state. Read BEFORE the first render, so a reload that
    left the die open comes back open instead of silently closing it. */
@@ -1038,7 +1270,7 @@ def _verify_js(outp):
     src = m.group(1)
     required = ["buildList", "showList", "execListHTML", "buildMemMap",
                 "select", "render", "diffs", "hwtTable", "dieMount", "svgOf",
-                "esc", "dieToggle", "dieNamesToggle"]
+                "esc", "dieToggle", "dieNamesToggle", "srcPane"]
     # a binding counts as defined whether it is a declaration or a const arrow
     defs = {f: (re.search(r'function\s+%s\s*\(' % re.escape(f), src)
                 or re.search(r'\b(?:const|let|var)\s+%s\s*=' % re.escape(f), src))
