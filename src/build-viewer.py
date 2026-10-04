@@ -1603,6 +1603,21 @@ def main():
     # the raw trace that could disagree with it.
     flow = cfg.build_flow(trace["steps"])
 
+    # Everything the page FORMATS is already a hex string (`regs_h`, `eflags_h`,
+    # `mem_base_h`). The raw numeric snapshots have no reader at all - 0 hits in
+    # the page script and 0 in die3d.js - and they carry 229 values per trace
+    # that a JS double cannot hold: 0xffff888000186020 becomes
+    # 0xffff888000186000 the moment JSON.parse sees it, silently. Drop them,
+    # then prove none survived.
+    for s in trace["steps"]:
+        for k in ("regs", "mem_base", "mem_delta"):
+            s.pop(k, None)
+    big = re.findall(r'(?<![\w"])\d{16,}(?![\w"])', json.dumps(trace))
+    if big:
+        sys.exit("[verify] payload still holds %d integers past 2^53 (e.g. %s): "
+                 "the browser rounds these silently - emit hex strings"
+                 % (len(big), big[0]))
+
     html = (HTML
             .replace("__TRACE__", json.dumps(trace, separators=(",", ":")).replace("</", "<\\/"))
             .replace("__FLOW__", json.dumps(flow, separators=(",", ":")).replace("</", "<\\/"))
