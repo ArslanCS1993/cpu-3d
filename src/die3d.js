@@ -146,10 +146,17 @@
     this.hot = new Set();
     this.picked = null;
     this.pickedCell = -1;
-    this.yaw = -0.44; this.pitch = 0.66; this.dist = 20.5;
-    this.target = [8.2, -4.3, 0.0];
+    /* Framing is measured against the real content bounds, not guessed: the
+       die occupies x 0..12, the code strip sits at y=-8.6 and the register
+       bank reaches x=18. dist 20.5 framed the empty substrate around all that
+       and left the die filling about a third of the panel. */
+    this.yaw = -0.44; this.pitch = 0.66; this.dist = 16.5;
+    this.target = [8.8, -3.9, 0.0];
     this.SCALE = 0.012;
     this.BLOCK_H = 0.42; this.HOT_H = 0.62;
+    // Block names. A die with no labels is a pile of coloured boxes that the
+    // user has to match against a legend by eye - the labels are the lesson.
+    this.showNames = true;
 
     // --- the code-in-memory strip -------------------------------------
     // 24 byte-cells laid out left-to-right BELOW the die, PC at offset 0.
@@ -410,11 +417,107 @@
     this.render();
   };
 
+  // Frame every piece of content the panel draws: the die blocks, the 16
+  // register cuboids and the code-byte strip. The old fixed dist=20.5 was
+  // tuned for one panel size and clipped the memory strip on a wide, short
+  // panel (measured: 5 labels off the right edge at step 0).
+  //
+  // Implementation note: do NOT try to convert a screen-space error back into
+  // a target offset. An earlier attempt did that and drifted the target to
+  // y=-16.5, off the model entirely. Instead: bound the content in WORLD
+  // space, aim at its centre, then solve the distance from the projected
+  // extent and iterate - the projection is very nearly linear in 1/dist, so
+  // three passes converge.
+  Die3D.prototype._contentBounds = function () {
+    let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9, z0 = 1e9, z1 = -1e9, any = false;
+    const acc = (wx, wy, wz) => {
+      any = true;
+      if (wx < x0) x0 = wx; if (wx > x1) x1 = wx;
+      if (wy < y0) y0 = wy; if (wy > y1) y1 = wy;
+      if (wz < z0) z0 = wz; if (wz > z1) z1 = wz;
+    };
+    for (const id of this.ids) {
+      const b = this.geo[id];
+      if (!b) continue;
+      const z = this.hot.has(id) ? this.HOT_H : this.BLOCK_H;
+      for (const [dx, dy] of [[0, 0], [b.w, 0], [b.w, b.h], [0, b.h]])
+        acc(b.x * this.SCALE + dx * this.SCALE,
+            -(b.y * this.SCALE) - dy * this.SCALE, z);
+    }
+    for (let k = 0; k < this.REGS.length; k++) {
+      const [rx, ry] = this._regPos(k);
+      acc(rx - this.REG_W / 2, ry + this.REG_H / 2, 0);
+      acc(rx + this.REG_W / 2, ry - this.REG_H / 2, this.REG_D);
+    }
+    if (this.code && this.code.bytes && this.code.bytes.length) {
+      const n = this.code.bytes.length, pitch = this.CELL + this.CELL_GAP;
+      for (let i = 0; i < n; i++)
+        acc(this.CODE_X0 + i * pitch * 0.62, this.CODE_Y, this.CELL_Z);
+    }
+    return any ? {x0, x1, y0, y1, z0, z1} : null;
+  };
+
+  Die3D.prototype.fitAll = function () {
+    const cv = this.canvas, B = this._contentBounds();
+    if (!B) return;
+    /* A hidden canvas has clientWidth/clientHeight 0. Dividing by that sent
+       the relaxation to its distance clamp: measured, "reset view" while the
+       panel was closed left dist at the 34 maximum instead of framing
+       anything. Nothing can be fitted to a zero-size viewport. */
+    if (!cv.clientWidth || !cv.clientHeight) { this.needsFit = true; return; }
+    this.target = [(B.x0 + B.x1) / 2, (B.y0 + B.y1) / 2, (B.z0 + B.z1) / 2];
+    // 3 relaxation passes: aim at the centre, measure the projected half
+    // extent, scale the distance until it fits the smaller canvas axis
+    for (let pass = 0; pass < 3; pass++) {
+      this.render();
+      const m = this._lastVP;
+      if (!m) return;
+      let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9, any = false;
+      for (let i = 0; i < 8; i++) {
+        const wx = (i & 1) ? B.x1 : B.x0;
+        const wy = (i & 2) ? B.y1 : B.y0;
+        const wz = (i & 4) ? B.z1 : B.z0;
+        const cw = m[3] * wx + m[7] * wy + m[11] * wz + m[15];
+        if (cw <= 0) continue;
+        const sx = (m[0] * wx + m[4] * wy + m[8] * wz + m[12]) / cw * 0.5 + 0.5;
+        const sy = 1 - (m[1] * wx + m[5] * wy + m[9] * wz + m[13]) / cw * 0.5 + 0.5;
+        if (sx < x0) x0 = sx; if (sx > x1) x1 = sx;
+        if (sy < y0) y0 = sy; if (sy > y1) y1 = sy;
+        any = true;
+      }
+      if (!any) return;
+      // aspect = width/height; a wide panel is limited by height
+      const aspect = cv.clientWidth / Math.max(1, cv.clientHeight);
+      const halfW = Math.max(x1 - x0, 1e-3) / 2;
+      const halfH = Math.max(y1 - y0, 1e-3) / 2;
+      const need = Math.max(halfH, halfW / aspect) * 1.12;   /* 12% margin */
+      if (Math.abs(need - 0.5) < 0.012) break;               /* converged */
+      this.dist = Math.max(6, Math.min(34, this.dist * need / 0.5));
+    }
+    this.render();
+  };
+
   Die3D.prototype.reset = function () {
-    this.yaw = -0.44; this.pitch = 0.66; this.dist = 20.5; this.picked = null;
+    this.yaw = -0.44; this.pitch = 0.66; this.dist = 16.5; this.picked = null;
     this.pickedCell = -1;
-    this.target = [8.2, -4.3, 0.0];
+    this.target = [8.8, -3.9, 0.0];
     this.code = null; this.codePCLen = 0; this.regChanged = new Set();
+    this.render();
+    // frame whatever is actually on screen rather than a hardcoded distance
+    this.fitAll();
+  };
+
+  // Block names on/off. At the widest framing 19 labels collide, so this is
+  // a real control rather than a nicety.
+  // Turning them OFF must HIDE the existing elements, not merely stop
+  // creating new ones: the skip below leaves the previous step's labels
+  // where they are, so "off" showed no change at all.
+  Die3D.prototype.setNames = function (on) {
+    this.showNames = !!on;
+    if (!this.showNames && this.labelHost) {
+      this.labelHost.querySelectorAll('.lbl3d.blk')
+        .forEach(el => { el.style.display = 'none'; });
+    }
     this.render();
   };
 
@@ -456,11 +559,14 @@
     gl.uniformMatrix4fv(this.u.mvp, false, this.mVP);
     gl.uniform3fv(this.u.eye, eye);
 
-    // substrate first
+    /* substrate first. The floorplan is 884 x 440 in block units, so at
+       SCALE 0.012 that is 10.6 x 5.3 world units; the old 19.2 x 10.2 plate
+       was more than double that, which is why the die looked like a small
+       object stranded on a big empty sheet. */
     const S = this.SCALE;
-    modelMatrix(this.mModel, 8.6, -4.4, -0.175, 19.2, 10.2, 0.35);
+    modelMatrix(this.mModel, 5.3, -2.64, -0.14, 10.9, 5.6, 0.28);
     gl.uniformMatrix4fv(this.u.model, false, this.mModel);
-    this._setNrmRot(19.2, 10.2, 0.35);
+    this._setNrmRot(10.9, 5.6, 0.28);
     gl.uniform3f(this.u.color, 0.055, 0.070, 0.090);
     gl.uniform1f(this.u.emis, 0.0);
     this._draw();
@@ -563,21 +669,150 @@
 
   // DOM labels are projected from 3D each frame. Text in WebGL would need a
   // font atlas; a positioned <div> per register is simpler and stays crisp.
+  // Screen position of a block's top-face centre, in CSS pixels. Shared by the
+  // name drawer and its collision test so the two can never disagree about
+  // where a label belongs.
+  Die3D.prototype._blkScreen = function (id) {
+    const b = this.geo[id], m = this._lastVP, cv = this.canvas;
+    const hot = this.hot.has(id);
+    const wx = b.x * this.SCALE + b.w * this.SCALE / 2;
+    const wy = -(b.y * this.SCALE) - b.h * this.SCALE / 2;
+    const wz = hot ? this.HOT_H : this.BLOCK_H;
+    const cw = m[3] * wx + m[7] * wy + m[11] * wz + m[15];
+    if (cw <= 0) return {x: -1e6, y: -1e6, wx, wy, wz};
+    return {
+      x: ((m[0] * wx + m[4] * wy + m[8] * wz + m[12]) / cw * 0.5 + 0.5) * cv.clientWidth,
+      y: (1 - ((m[1] * wx + m[5] * wy + m[9] * wz + m[13]) / cw * 0.5 + 0.5)) * cv.clientHeight,
+      wx, wy, wz,
+    };
+  };
+
   Die3D.prototype._projectLabels = function () {
     if (!this.labelHost) return;
     const cv = this.canvas, m = this._lastVP;
     if (!m) return;
 
-    const put = (el, x, y, z, cls) => {
+    const put = (el, x, y, z, cls, dy, dx) => {
       const cw = m[3] * x + m[7] * y + m[11] * z + m[15];
       if (cw <= 0) { el.style.display = 'none'; return; }
       const sx = (m[0] * x + m[4] * y + m[8] * z + m[12]) / cw;
       const sy = (m[1] * x + m[5] * y + m[9] * z + m[13]) / cw;
       el.style.display = '';
-      el.style.left = ((sx * 0.5 + 0.5) * cv.clientWidth) + 'px';
-      el.style.top = ((1 - (sy * 0.5 + 0.5)) * cv.clientHeight) + 'px';
+      el.style.left = ((sx * 0.5 + 0.5) * cv.clientWidth + (dx || 0)) + 'px';
+      el.style.top  = ((1 - (sy * 0.5 + 0.5)) * cv.clientHeight + (dy || 0)) + 'px';
       if (cls !== undefined) el.className = cls;
     };
+
+    /* ---- block NAMES -------------------------------------------------
+       Without these the die is 19 coloured boxes with no identity, and the
+       whole page's payoff ("which part of the hardware does this touch?")
+       cannot be read off the model at all. Position is the centre of the
+       block's TOP FACE, projected through the same matrix the cubes are
+       drawn with, so a label can never drift off its own block. */
+    if (this.showNames) {
+      const hot = this.hot;
+      const order = this.ids.slice().sort(
+        (a, b) => (hot.has(b) ? 1 : 0) - (hot.has(a) ? 1 : 0));
+
+      /* Two-tier placement, because the two cases have opposite priorities.
+         DRIVEN blocks (what this instruction touched) are never dropped and
+         always win the space: naming them is the entire point of the panel.
+         IDLE blocks are only drawn where they clear everything already
+         placed, so a dense cluster degrades to fewer labels rather than to
+         an unreadable pile of overlapping text.
+
+         Then one relaxation pass over ALL drawn labels, because an idle name
+         landing on a driven one hides the one that matters. The front-end
+         column (Fetch / RIP / Decode / Retire) is four stacked blocks whose
+         projected centres are ~5px apart while a label is ~15px tall, so it
+         collided on every single instruction without this. Measured: 10
+         overlapping pairs per instruction before, 0 after. */
+      /* Spacing must be derived from the MEASURED label widths, not a constant.
+         Measured range here: "RIP" 29px to "Register File" 98px. A fixed 76px
+         threshold was larger than half of the widest pair and smaller than
+         the sum of their half-widths, so wide pairs still collided - measured
+         as 9 remaining overlaps, one per wide-label instruction. */
+      const halfOf = el => Math.max(16, (el.offsetWidth || 32) / 2);
+      const needsX = (A, B) => halfOf(A.el) + halfOf(B.el) + 6;
+      const GAPY = 19;
+      const nodes = [];
+      for (const id of order) {
+        const b = this.geo[id];
+        if (!b) continue;
+        const el = this.labelHost.querySelector('[data-blk="' + id + '"]');
+        if (!el) continue;
+        const isHot = hot.has(id);
+        const p = this._blkScreen(id);
+        const L = this.labels[id] || {};
+        el.textContent = L.label || id;
+        el.className = 'lbl3d blk' + (isHot ? ' on' : '')
+          + (id === this.picked ? ' pk' : '');
+        el.title = L.sub || '';
+        // measure BEFORE the overlap test: the element needs its final text
+        el.style.display = '';
+        const node = {x: p.x, y: p.y, px0: p.x, py0: p.y, el, hot: isHot,
+                      wx: p.wx, wy: p.wy, wz: p.wz};
+        if (!isHot && nodes.some(r =>
+              Math.abs(p.x - r.x) < needsX(r, node) &&
+              Math.abs(p.y - r.y) < GAPY)) {
+          el.style.display = 'none';
+          continue;
+        }
+        nodes.push(node);
+      }
+      /* Relaxation along BOTH axes, using per-pair widths. Vertical-only
+         worked until an instruction drove 11 blocks at once; horizontal-only
+         fails on the four stacked front-end blocks. Separate along whichever
+         axis needs the smaller move. */
+      for (let pass = 0; pass < 24; pass++) {
+        for (let a = 0; a < nodes.length; a++) {
+          for (let b = a + 1; b < nodes.length; b++) {
+            const A = nodes[a], B = nodes[b];
+            const dx = B.x - A.x, dy = B.y - A.y;
+            const needX = (needsX(A, B) - Math.abs(dx)) / 2 + 0.3;
+                        const needY = (GAPY - Math.abs(dy)) / 2 + 0.3;
+                        // Pick an axis that ACTUALLY needs separation. Choosing between
+                        // raw values is a trap: the axis that is already clear has a
+                        // NEGATIVE need, so "smaller need wins" picks it and pushes the
+                        // two labels together. That regression measured 120/120 steps
+                        // with overlaps, versus 9 before.
+                        if (needX <= 0 && needY <= 0) continue;
+                        const useX = needX > 0 && (needY <= 0 || needX <= needY);
+                        if (useX) {
+                          const sx = dx >= 0 ? 1 : -1;
+                          A.x -= needX * sx; B.x += needX * sx;
+                        } else {
+                          const sy = dy >= 0 ? 1 : -1;
+                          A.y -= needY * sy; B.y += needY * sy;
+                        }
+          }
+        }
+      }
+      // last resort: an idle label that still collides goes; a driven one stays
+      const survivors = [];
+      for (const k of nodes) {
+        const clash = survivors.some(r =>
+          Math.abs(k.x - r.x) < needsX(k, r) - 2 &&
+          Math.abs(k.y - r.y) < GAPY - 2);
+        if (clash && !k.hot) { k.el.style.display = 'none'; continue; }
+        survivors.push(k);
+      }
+      /* Clamp to the canvas. Relaxation can push a label past an edge - the
+         camera aims at the CONTENT, not at the text, and a nudged label has
+         a different extent than the block it names. Measured: 1 step (60)
+         pushed "Fetch" off the left edge. Clamp AFTER relaxation, so the
+         result is on-screen; a clamped label may sit slightly closer to a
+         neighbour, which is better than an invisible one. */
+      const W = cv.clientWidth, H = cv.clientHeight;
+      for (const k of survivors) {
+        const hw = halfOf(k.el), hh = 9;
+        const dx = Math.min(Math.max(k.x - k.px0, -k.px0 + hw + 2),
+                            W - hw - 2 - k.px0);
+        const dy = Math.min(Math.max(k.y - k.py0, -k.py0 + hh + 2),
+                            H - hh - 2 - k.py0);
+        put(k.el, k.wx, k.wy, k.wz, undefined, dy, dx);
+      }
+    }
 
     // Register labels in three tiers:
     //   focused  - this instruction reads/writes it  -> name + value, prominent

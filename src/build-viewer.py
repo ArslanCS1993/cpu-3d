@@ -174,7 +174,7 @@ HTML = r"""<!DOCTYPE html>
   button{background:var(--panel2);color:var(--fg);border:1px solid var(--edge);
          border-radius:5px;padding:5px 10px;cursor:pointer;font:inherit;font-size:12px}
   button:hover{border-color:var(--accent);color:#fff}
-  main{display:grid;grid-template-columns:minmax(440px,45%) 1fr;
+  main{display:grid;grid-template-columns:minmax(280px,23%) minmax(320px,1fr) minmax(400px,38%);
        height:calc(100vh - 46px)}
   #left{display:flex;flex-direction:column;min-height:0;min-width:0}
   #tabs{display:flex;gap:4px;padding:6px 8px;background:var(--panel);
@@ -185,7 +185,15 @@ HTML = r"""<!DOCTYPE html>
         flex:1 1 auto;min-height:0}
   /* flex item that must both grow AND scroll: without min-height:0 a flex
      child refuses to shrink below its content and the pane is squeezed */
-  #detail{overflow-y:auto;padding:0 18px 60px;flex:1 1 auto;min-height:0}
+  #detail{overflow-y:auto;padding:0 18px 60px;min-height:0}
+  #hw{overflow-y:auto;padding:0 18px 60px;min-height:0;
+      border-left:1px solid var(--edge);background:#0b0f14}
+  /* narrow window: one column, each pane scrolls on its own */
+  @media (max-width:1020px){
+    main{grid-template-columns:1fr;height:auto;max-height:calc(100vh - 46px)}
+    #list,#detail,#hw{max-height:calc(100vh - 92px)}
+    #hw{border-left:0;border-top:1px solid var(--edge)}
+  }
   .row{display:flex;gap:8px;padding:2px 10px;cursor:pointer;
        border-left:3px solid transparent;white-space:nowrap;align-items:baseline}
   .row:hover{background:#1f2630}
@@ -287,15 +295,21 @@ HTML = r"""<!DOCTYPE html>
   .emo{font-size:13px;line-height:1;margin-left:5px;opacity:.95}
   .emo.big{font-size:30px;display:block;margin:6px auto 0;width:56px;text-align:center}
 
-  /* --- per-instruction hardware table --- */
-  table.hwt{width:100%;border-collapse:collapse;font-size:12.5px}
+  /* --- per-instruction hardware table ---
+     table-layout:fixed is load-bearing: four columns of prose in a 38%-wide
+     column otherwise forces the table wider than its pane and the "why" text
+     - the whole point of the table - is what gets clipped. */
+  table.hwt{width:100%;table-layout:fixed;border-collapse:collapse;font-size:12.5px}
   table.hwt th{text-align:left;font:600 10.5px ui-monospace,Menlo,monospace;
     text-transform:uppercase;letter-spacing:.6px;color:#5d6a7a;
     padding:7px 9px;border-bottom:1px solid var(--edge)}
-  table.hwt td{padding:7px 9px;border-bottom:1px solid #1b222c;vertical-align:top}
+  table.hwt td{padding:7px 9px;border-bottom:1px solid #1b222c;vertical-align:top;
+    overflow-wrap:anywhere}
   table.hwt tr:last-child td{border-bottom:none}
-  table.hwt td.part{color:#7d8b9c;font-weight:600;white-space:nowrap}
-  table.hwt td.item{font:600 12.5px ui-monospace,Menlo,monospace;color:#c9d1d9;white-space:nowrap}
+  table.hwt col.c1{width:20%} table.hwt col.c2{width:17%}
+  table.hwt col.c3{width:8%}  table.hwt col.c4{width:55%}
+  table.hwt td.part{color:#7d8b9c;font-weight:600}
+  table.hwt td.item{font:600 12.5px ui-monospace,Menlo,monospace;color:#c9d1d9}
   table.hwt td.why{color:#8b98a8}
   table.hwt .acc{display:inline-block;min-width:19px;text-align:center;
     font:700 10.5px ui-monospace,Menlo,monospace;padding:2px 4px;border-radius:4px}
@@ -311,32 +325,33 @@ HTML = r"""<!DOCTYPE html>
   .hwtlegend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;
     font-size:11px;color:#6e7b8a}
 
-  /* --- 3D die panel (WebGL, no libraries) --- */
-  #right{display:flex;flex-direction:column;min-height:0;overflow:hidden}
-  #die3dhost{flex:0 0 auto;padding:0 18px 18px}
-  #die3dhost:empty{display:none}
-  #die3dhost h2{margin:14px 0 10px}
-  /* clamp, not a fixed height: the die sits BELOW the scrolling detail pane in
-     a flex column, so a fixed 340px starves the detail pane on a short window
-     (measured: a 577px-tall viewport left only 99px for the text). */
-  #die3dwrap{position:relative;border:1px solid var(--edge);border-radius:10px;
-    overflow:hidden;background:#04060a;height:clamp(190px,32vh,340px)}
+  /* --- 3D die panel (WebGL, no libraries) ---
+     It is a floating overlay, NOT a grid column: the die used to sit in the
+     right-hand flex column permanently, which stole ~340px of height from
+     the detail pane on every screen and could not be dismissed. Now it is
+     hidden by default and summoned by the "3D die" button in the header. */
+  #die3dhost{display:none;position:fixed;top:58px;right:14px;z-index:40;
+             width:min(760px,92vw);padding:0}
+  #die3dhost.open{display:block}
+  #die3dhead{display:flex;align-items:center;gap:6px;padding:7px 9px;
+             background:var(--panel);border:1px solid var(--edge);
+             border-bottom:0;border-radius:10px 10px 0 0}
+  #die3dhead h2{margin:0;border:0;padding:0;flex:1;font-size:12px}
+  #die3dhead button{font-size:11px;padding:3px 8px}
+  #die3dhead button.on{border-color:var(--good);color:#7ee787}
+  #die3dwrap{position:relative;border:1px solid var(--edge);
+    background:#04060a;height:clamp(280px,52vh,620px)}
   #die3d{width:100%;height:100%;display:block;cursor:grab}
   #die3d:active{cursor:grabbing}
   #die3dfallback{position:absolute;inset:0;display:none;align-items:center;
     justify-content:center;text-align:center;color:#8b98a8;font-size:13px;padding:20px}
-  .die3dlegend{position:absolute;left:10px;top:9px;font:11px ui-monospace,monospace;
+  .die3dlegend{position:absolute;left:10px;bottom:9px;font:11px ui-monospace,monospace;
     color:#8b98a8;background:rgba(4,6,10,.72);padding:4px 8px;border-radius:5px;
     pointer-events:none;line-height:1.7}
   .die3dlegend b{color:#7ee787}
-  #die3dreset,#die3dcode{position:absolute;top:9px;font:11px ui-monospace,monospace;
-    color:#8b98a8;background:rgba(4,6,10,.72);border:1px solid var(--edge);
-    border-radius:5px;padding:4px 9px;cursor:pointer;z-index:3}
-  #die3dreset{right:10px}
-  #die3dcode{right:96px}
-  #die3dreset:hover,#die3dcode:hover{color:#c9d1d9;border-color:#3d4753}
-  #die3dpick{margin-top:9px;font:12px ui-monospace,monospace;color:#8b98a8;
-    min-height:17px}
+  #die3dpick{padding:7px 9px;background:var(--panel);
+    border:1px solid var(--edge);border-top:0;border-radius:0 0 10px 10px;
+    font:12px ui-monospace,monospace;color:#8b98a8;min-height:32px}
   #die3dpick b{color:#79c0ff}
 
   /* 3D projected labels: one <div> per register and per code byte, moved
@@ -351,6 +366,13 @@ HTML = r"""<!DOCTYPE html>
   .lbl3d.reg.w{color:#ffa657;font-size:10.5px}
   .lbl3d.byt{color:#6e7b8a;font-size:9px}
   .lbl3d.byt.pc{color:#7ee787}
+  /* block names on the die: dim when idle, green when this instruction
+     drives that block, blue outline when picked */
+  .lbl3d.blk{color:#8b98a8;font-size:10.5px;background:rgba(4,6,10,.62);
+             padding:1px 4px;border-radius:3px}
+  .lbl3d.blk.on{color:#7ee787;background:rgba(10,32,18,.88);
+                font-size:11.5px;font-weight:700}
+  .lbl3d.blk.pk{outline:1px solid #79c0ff}
   #die3dlab{position:absolute;inset:0;pointer-events:none;overflow:hidden}
 </style>
 </head>
@@ -361,6 +383,7 @@ HTML = r"""<!DOCTYPE html>
   <span class="kv"><b id="m-steps"></b> instructions</span>
   <span class="kv"><b id="m-kernel"></b></span>
   <div class="bar">
+    <button id="die-toggle" title="show or hide the 3D CPU die">3D die</button>
     <button id="first">&#9198;</button>
     <button id="prev">&#9664; prev</button>
     <button id="next">next &#9654;</button>
@@ -375,11 +398,12 @@ HTML = r"""<!DOCTYPE html>
     </div>
     <div id="list"></div>
   </div>
-  <div id="right">
-    <div id="detail"></div>
-    <div id="die3dhost"></div>
-  </div>
+  <div id="detail"></div>
+  <div id="hw"></div>
 </main>
+
+<!-- the 3D die is an overlay, hidden until the header button asks for it -->
+<div id="die3dhost"></div>
 
 <script id="trace-data" type="application/json">__TRACE__</script>
 <script>
@@ -598,7 +622,6 @@ function hwtTable(rows, d){
     </tr>`;
   }).join('');
 
-  const confirmed = document.querySelectorAll('#detail table.hwt .obsbadge').length;
   const parts = new Set(rows.map(r=>r.part)).size;
   const writes = rows.filter(r=>r.access==='W'||r.access==='RW').length;
   const reads  = rows.filter(r=>r.access==='R'||r.access==='RW').length;
@@ -606,6 +629,7 @@ function hwtTable(rows, d){
 
   return `<h2>Hardware table &mdash; exactly what this touches</h2><div class="card">
     <table class="hwt">
+      <colgroup><col class="c1"><col class="c2"><col class="c3"><col class="c4"></colgroup>
       <tr><th>part of the CPU</th><th>item</th><th>R/W</th><th>why</th></tr>
       ${body}
     </table>
@@ -628,23 +652,63 @@ __DIE3D_JS__
 
 
 /* ---------------- detail pane ---------------- */
-let DIE = null;
+let DIE = null, DIE_OPEN = false, SHOW_NAMES = true;
+
+/* The die panel is an OVERLAY and it is closed on load. Two reasons, both
+   measured: it permanently stole ~340px of height from the detail pane, and
+   it built a WebGL context plus 19 boxes and 40 labels on every page load
+   before the reader had asked for any of it. Opening is one click (header
+   button, the "show the 3D die" button in the hardware column, or the D key)
+   and the state is remembered per browser. */
+function dieToggle(force){
+  const host = document.getElementById('die3dhost');
+  const btn  = document.getElementById('die-toggle');
+  if (!host) return;
+  DIE_OPEN = (force === undefined) ? !DIE_OPEN : !!force;
+  host.classList.toggle('open', DIE_OPEN);
+  if (btn) btn.classList.toggle('on', DIE_OPEN);
+  try { localStorage.setItem('die3d', DIE_OPEN ? '1' : '0'); } catch (e) {}
+  const hw3d = document.getElementById('hw-3d');
+  if (hw3d) hw3d.innerHTML = DIE_OPEN
+    ? 'hide the 3D die &#9660;' : 'show the 3D die &#9654;';
+  if (DIE_OPEN) { dieMount(T.steps[cur].sem || {}); if (DIE && DIE.gl) render(); }
+}
+function dieNamesToggle(){
+  SHOW_NAMES = !SHOW_NAMES;
+  if (DIE) DIE.setNames(SHOW_NAMES);
+  const b = document.getElementById('die3dnames');
+  if (b) { b.classList.toggle('on', SHOW_NAMES);
+           b.textContent = SHOW_NAMES ? 'names: on' : 'names: off'; }
+  try { localStorage.setItem('die3d-names', SHOW_NAMES ? '1' : '0'); } catch (e) {}
+}
+
 function dieMount(sem){
   const host = document.getElementById('die3dhost');
   if (!host) return;
+  /* Lazily built. Creating the context on every page load cost a WebGL
+     context, 19 cubes and 40 label divs before anyone asked to see the die -
+     and a display:none canvas has clientWidth 0, so the first real frame
+     would have been a 1x1 render anyway. */
+  if (!DIE_OPEN) return;
   if (!DIE) {
-    host.innerHTML = `<h2>The die, in 3D</h2>
+    host.innerHTML = `<div id="die3dhead">
+        <h2>The die, in 3D</h2>
+        <button id="die3dnames" title="show the hardware block names">names</button>
+        <button id="die3dcode">zoom to memory</button>
+        <button id="die3dreset">reset view</button>
+        <button id="die3dclose" title="close (D)">&#10005;</button>
+      </div>
       <div id="die3dwrap">
         <canvas id="die3d"></canvas>
         <div id="die3dlab"></div>
         <div id="die3dfallback">WebGL is unavailable in this browser, so the 3D
-          die cannot be drawn. The 2D hardware map above shows the same
-          information.</div>
+          die cannot be drawn. The 2D hardware map shows the same information.</div>
         <div class="die3dlegend"></div>
-        <button id="die3dreset">reset view</button>
-        <button id="die3dcode">zoom to memory</button>
       </div>
       <div id="die3dpick"></div>`;
+    document.getElementById('die3dnames').classList.toggle('on', SHOW_NAMES);
+    document.getElementById('die3dnames').textContent =
+      SHOW_NAMES ? 'names: on' : 'names: off';
   }
   // the legend is cheap text, so it can change every step; the CANVAS cannot
   // be rewritten, so it lives in this host and is created exactly once.
@@ -661,10 +725,15 @@ function dieMount(sem){
       return;
     }
     DIE.ids = BLOCKS.map(b => b[0]);
-    // label elements live in the persistent host, created exactly once
+    DIE.showNames = SHOW_NAMES;
+    DIE.needsFit = true;
+    // label elements live in the persistent host, created exactly once.
+    // THREE families: block names (the hardware identity the 2D map also
+    // shows, but here on the model), register names, and code-byte values.
     const lab = document.getElementById('die3dlab');
     if (lab) {
-      lab.innerHTML = DIE.REGS.map(r => `<div class="lbl3d reg" data-reg="${r}"></div>`).join('')
+      lab.innerHTML = BLOCKS.map(b => `<div class="lbl3d blk" data-blk="${b[0]}"></div>`).join('')
+        + DIE.REGS.map(r => `<div class="lbl3d reg" data-reg="${r}"></div>`).join('')
         + Array.from({length: 24}, (_, i) => `<div class="lbl3d byt" data-byte="${i}"></div>`).join('');
       DIE.labelHost = lab;
     }
@@ -678,6 +747,8 @@ function dieMount(sem){
     };
     document.getElementById('die3dreset').addEventListener('click', () => DIE.reset());
     document.getElementById('die3dcode').addEventListener('click', () => DIE.focusCode());
+    document.getElementById('die3dclose').addEventListener('click', () => dieToggle(false));
+    document.getElementById('die3dnames').addEventListener('click', dieNamesToggle);
     /* Clicking a memory cell selects the instruction that owns that byte, so
        you can navigate by pointing at code in memory rather than reading a
        list. code_map is built from the trace, so it is a real ownership
@@ -695,18 +766,24 @@ function dieMount(sem){
       }
       if (owner >= 0 && owner !== cur) select(owner);
     };
-    window.addEventListener('resize', () => DIE.render());
+    window.addEventListener('resize', () => { if (DIE && DIE.gl) DIE.render(); });
     DIE.render();
   } catch (e) {
     document.getElementById('die3dfallback').style.display = 'flex';
     document.getElementById('die3dfallback').textContent = '3D die failed: ' + e.message;
   }
 }
-
+/* ---------------- detail pane ----------------
+   Two independent columns, because they answer two different questions:
+     #detail  "what does this instruction MEAN"  - source, bytes, semantics
+     #hw      "what did the HARDWARE do"         - map, table, flags, memory
+   Merged into one scrolling column they competed for the same pixels, and the
+   hardware answer - the actual point of the page - was always below the fold. */
 function render(){
   const s = T.steps[cur], d = diffs(cur), p = s.insn_parsed, sem = s.sem || {};
   const a = d.after || s;                 /* state once the instruction ran */
-  let h = '';
+  let h = '';                             /* the instruction column */
+  let g = '';                             /* the hardware column */
 
   h += `<div class="sticky"><div class="card">
     <div class="path"><b>${esc(s.symbol)}</b> &nbsp;&middot;&nbsp; ${esc(s.file_short)}:${s.line}</div>
@@ -732,12 +809,12 @@ function render(){
       no classifier rule matched &mdash; treat the hardware map below as front-end only</div>`;
   h += `</div>`;
 
-  /* --- the picture, as a table: one row per hardware item --- */
-  h += hwtTable(s.hwt, d);
-
-  /* --- the picture, as a chip --- */
+  /* --- the picture, as a chip: FIRST, because it is the fastest read ---
+     the 2D map answers "which blocks" in one glance; the table below it then
+     explains each row. Leading with the table made the reader scroll past a
+     dozen prose rows to reach the only picture on the page. */
   const on = sem.units || [], seen = d.observed || [];
-  h += `<h2>Hardware it drives</h2><div class="card">
+  g += `<h2>Hardware it drives</h2><div class="card">
     ${hardwareMap(on, seen)}
     <div class="maplegend">
       <span><i style="background:#14312a;border:1px solid #3fb950"></i>
@@ -753,23 +830,29 @@ function render(){
     <div class="legend" style="margin-top:10px">
       ${on.length} of ${BLOCKS.length} blocks involved &nbsp;&middot;&nbsp;
       ${seen.length} independently confirmed by observed state change
-    </div></div>`;
+    </div>
+    <button class="ubox" id="hw-3d" style="margin-top:10px;cursor:pointer">
+      show the 3D die &#9654;</button>
+    </div>`;
 
-  h += `<h2>What changed, in hardware terms</h2><div class="card"><div class="why">${why(d, sem)}</div></div>`;
+  /* --- the picture, as a table: one row per hardware item --- */
+  g += hwtTable(s.hwt, d);
 
-  h += `<h2>Registers</h2><div class="card"><table>
+  g += `<h2>What changed, in hardware terms</h2><div class="card"><div class="why">${why(d, sem)}</div></div>`;
+
+  g += `<h2>Registers</h2><div class="card"><table>
     <tr><th>register</th><th>before</th><th>after</th></tr>`;
   if(d.regs.length){
-    h += d.regs.map(r=>`<tr><td class="reg">${r.name}</td>
+    g += d.regs.map(r=>`<tr><td class="reg">${r.name}</td>
       <td class="old">${esc(val(r.from))}</td><td class="new">${esc(val(r.to))}</td></tr>`).join('');
   } else {
-    h += GPRS.map(r=>`<tr><td class="reg">${r}</td>
+    g += GPRS.map(r=>`<tr><td class="reg">${r}</td>
       <td class="unch">${esc(val(s.regs_h[r]))}</td>
       <td class="unch">unchanged</td></tr>`).join('');
   }
-  h += `</table></div>`;
+  g += `</table></div>`;
 
-  h += `<h2>EFLAGS</h2><div class="card">
+  g += `<h2>EFLAGS</h2><div class="card">
     <div style="margin-bottom:9px;color:var(--dim);font-size:11px">full word
       <b style="color:var(--fg)">${esc(a.eflags_h)}</b>${
       d.after && d.after.eflags_h !== s.eflags_h ? ` &nbsp;&larr; was ${esc(s.eflags_h)}`:''}</div>` + FLAGS.map(f=>{
@@ -778,7 +861,7 @@ function render(){
       ch?' style="outline:2px solid var(--warn)"':''}>${f}=${on?1:0}</span>`;
   }).join('') + `</div>`;
 
-  h += `<h2>Segments &amp; privilege level</h2><div class="card"><table>
+  g += `<h2>Segments &amp; privilege level</h2><div class="card"><table>
     <tr><th>segment</th><th>before</th><th>after</th><th>meaning</th></tr>` +
     SSEGS.map(g=>{
       const ch = d.segs.some(x=>x.name===g.toUpperCase());
@@ -789,7 +872,7 @@ function render(){
         <td class="${ch?'':'unch'}">${mean||'&mdash;'}</td></tr>`;
     }).join('') + `</table></div>`;
 
-  h += `<h2>Memory writes</h2><div class="card">`;
+  g += `<h2>Memory writes</h2><div class="card">`;
   if(d.mem.length){
     const groups = [];
     d.mem.forEach(m => {
@@ -798,17 +881,17 @@ function render(){
         lastg.after.push(m.to);
       else groups.push({off:m.off, before:[m.from], after:[m.to]});
     });
-    h += `<table><tr><th>address</th><th>was</th><th>became</th></tr>` +
-      groups.map(g=>`<tr><td class="reg">${esc(g.off)}</td>
-        <td class="old">${g.before.map(b=>b.toString(16).padStart(2,'0')).join(' ')}</td>
-        <td class="new">${g.after.map(b=>b.toString(16).padStart(2,'0')).join(' ')}</td></tr>`).join('') +
+    g += `<table><tr><th>address</th><th>was</th><th>became</th></tr>` +
+      groups.map(x=>`<tr><td class="reg">${esc(x.off)}</td>
+        <td class="old">${x.before.map(b=>b.toString(16).padStart(2,'0')).join(' ')}</td>
+        <td class="new">${x.after.map(b=>b.toString(16).padStart(2,'0')).join(' ')}</td></tr>`).join('') +
       `</table><div class="legend" style="margin-top:10px">watched window
         ${esc(a.mem_base_h)} &ndash; ${esc('0x'+(big(a.mem_base_h)+BigInt(a.mem.length)).toString(16))}
         (the kernel stack)</div>`;
   } else {
-    h += `<span class="none">nothing in the watched window changed on this instruction</span>`;
+    g += `<span class="none">nothing in the watched window changed on this instruction</span>`;
   }
-  h += `</div>`;
+  g += `</div>`;
 
   h += `<h2>Every general register after this instruction</h2><div class="card">
     <table><tr>` + GPRS.map(r=>{
@@ -819,11 +902,15 @@ function render(){
 
   h += `<h2>Keyboard</h2><div class="card why">
     <kbd>&darr;</kbd>/<kbd>J</kbd> next &nbsp; <kbd>&uarr;</kbd>/<kbd>K</kbd> previous &nbsp;
-    <kbd>Home</kbd>/<kbd>End</kbd> jump &nbsp;&middot;&nbsp; click any instruction on the left.</div>`;
+    <kbd>Home</kbd>/<kbd>End</kbd> jump &nbsp;&middot;&nbsp; click any instruction on the left &nbsp;&middot;&nbsp;
+    <kbd>D</kbd> show or hide the 3D die.</div>`;
 
   document.getElementById('detail').innerHTML = h;
+  document.getElementById('hw').innerHTML = g;
+  const hw3d = document.getElementById('hw-3d');
+  if (hw3d) hw3d.onclick = () => dieToggle();
   dieMount(sem);
-  if (DIE && DIE.gl) {
+  if (DIE_OPEN && DIE && DIE.gl) {
     DIE.setHot(sem.units || []);
     // real kernel bytes at this PC, plus how many of them this instruction owns
     DIE.setCode(s.code || null, (s.insn_parsed || {}).length || 0);
@@ -838,6 +925,9 @@ function render(){
       .map(r => (r.item || '').toLowerCase())
       .filter(n => /^(r[a-d]x|[re]sp|r(8|9|1[0-5])|[re]ip)$/.test(n));
     DIE.setRegs(vals, (d.regs || []).map(r => r.name.toLowerCase()), focus);
+    // frame once, after the content exists: the camera has nothing to fit
+    // before the first instruction's blocks and bytes are loaded
+    if (DIE.needsFit) { DIE.needsFit = false; DIE.fitAll(); }
   }
 }
 
@@ -879,6 +969,7 @@ document.getElementById('m-steps').textContent  = T.meta.steps;
 document.getElementById('m-kernel').textContent = T.meta.kernel;
 document.getElementById('prev').onclick  = ()=>select(cur-1);
 document.getElementById('next').onclick  = ()=>select(cur+1);
+document.getElementById('die-toggle').onclick = () => dieToggle();
 document.getElementById('first').onclick = ()=>select(0);
 document.getElementById('last').onclick  = ()=>select(T.steps.length-1);
 document.getElementById('tab-exec').onclick = () => {
@@ -896,9 +987,14 @@ document.addEventListener('keydown', e=>{
   if(e.key==='ArrowUp'  ||e.key==='k'){select(cur-1);e.preventDefault();}
   if(e.key==='Home'){select(0);e.preventDefault();}
   if(e.key==='End') {select(T.steps.length-1);e.preventDefault();}
+  if(e.key==='d'||e.key==='D'){dieToggle();e.preventDefault();}
 });
+/* remembered panel state. Read BEFORE the first render, so a reload that
+   left the die open comes back open instead of silently closing it. */
+try { SHOW_NAMES = localStorage.getItem('die3d-names') !== '0'; } catch (e) {}
 buildList();
 select(0);
+try { if (localStorage.getItem('die3d') === '1') dieToggle(true); } catch (e) {}
 </script>
 </body>
 </html>
@@ -941,7 +1037,8 @@ def _verify_js(outp):
     # assert the entry points are actually defined, not merely parseable.
     src = m.group(1)
     required = ["buildList", "showList", "execListHTML", "buildMemMap",
-                "select", "render", "diffs", "hwtTable", "dieMount", "svgOf", "esc"]
+                "select", "render", "diffs", "hwtTable", "dieMount", "svgOf",
+                "esc", "dieToggle", "dieNamesToggle"]
     # a binding counts as defined whether it is a declaration or a const arrow
     defs = {f: (re.search(r'function\s+%s\s*\(' % re.escape(f), src)
                 or re.search(r'\b(?:const|let|var)\s+%s\s*=' % re.escape(f), src))
