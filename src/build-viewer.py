@@ -14,6 +14,7 @@ import argparse, json, os, re, struct, subprocess, sys, tempfile
 LAB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LAB)
 import x86sem
+import cfg
 GPRS = ["rax","rcx","rdx","rbx","rsi","rdi","rbp","rsp",
         "r8","r9","r10","r11","r12","r13","r14","r15"]
 FLAG_ORDER = ["CF","PF","AF","ZF","SF","TF","IF","DF","OF","NT","RF","VM","AC","VIF","VIP"]
@@ -536,6 +537,33 @@ HTML = r"""<!DOCTYPE html>
                 font-size:11.5px;font-weight:700}
   .lbl3d.blk.pk{outline:1px solid #79c0ff}
   #die3dlab{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+  /* ---------------- the flow diagram (control-flow graph) ---------------- */
+  /* An overlay like the die: it is a different way of looking at the same
+     trace, not another column competing for width. */
+  #flowhost{position:fixed;inset:0;z-index:20;display:none;flex-direction:column;
+            background:rgba(4,7,11,.975)}
+  #flowhost.open{display:flex}
+  #flowbar{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:10px;align-items:center;
+           padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--edge)}
+  #flowbar .ttl{color:var(--hi);font-size:12px;font-weight:700;
+                text-transform:uppercase;letter-spacing:.6px}
+  #flowbar .stat{color:var(--dim);font-size:11px}
+  #flowbar .stat b{color:var(--fg)}
+  #flowbody{flex:1 1 auto;min-height:0;overflow:auto;padding:10px 14px 40px}
+  /* max-width caps the SVG at its natural size so it is never stretched;
+     below that the viewBox scales it down and the whole graph still fits. */
+  #flowsvg{display:block;margin:0 auto;max-width:100%}
+  #flowsvg .band{fill-opacity:.5}
+  #flowsvg .row{cursor:pointer}
+  #flowsvg .row:hover rect,#flowsvg .row:hover polygon{stroke:#fff}
+  #flowsvg .row.sel rect,#flowsvg .row.sel polygon{stroke:#fff;stroke-width:2}
+  #flowsvg text{user-select:none}
+  .legend{display:flex;flex-wrap:wrap;gap:4px 12px;margin:0 0 8px;font-size:11px;
+          color:var(--dim)}
+  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;
+            margin-right:5px;vertical-align:-1px}
+  .legend .ln{display:inline-block;width:20px;height:0;border-top:2px solid;
+              margin-right:5px;vertical-align:4px}
 </style>
 </head>
 <body>
@@ -545,6 +573,7 @@ HTML = r"""<!DOCTYPE html>
   <span class="kv"><b id="m-steps"></b> instructions</span>
   <span class="kv"><b id="m-kernel"></b></span>
   <div class="bar">
+    <button id="flow-toggle" title="control-flow diagram: instructions as boxes, conditions as diamonds">flow diagram</button>
     <button id="detail-toggle" title="show or hide the instruction description column">instruction detail</button>
     <button id="die-toggle" title="show or hide the 3D CPU die">3D die</button>
     <button id="first">&#9198;</button>
@@ -573,9 +602,25 @@ HTML = r"""<!DOCTYPE html>
 <!-- the 3D die is an overlay, hidden until the header button asks for it -->
 <div id="die3dhost"></div>
 
+<!-- the flow diagram is an overlay too: a different VIEW of the same trace,
+     not a fourth column competing for width -->
+<div id="flowhost">
+  <div id="flowbar">
+    <span class="ttl">control flow</span>
+    <button id="flow-exec" class="on">next execution order</button>
+    <button id="flow-addr">address in memory</button>
+    <span class="stat" id="flow-stats"></span>
+    <button id="flow-fit" title="scale the diagram to the window width">fit width</button>
+    <button id="flow-close" style="margin-left:auto">&#10005; close</button>
+  </div>
+  <div id="flowbody"><div class="legend" id="flow-legend"></div><div id="flowmount"></div></div>
+</div>
+
 <script id="trace-data" type="application/json">__TRACE__</script>
+<script id="flow-data" type="application/json">__FLOW__</script>
 <script>
 const T   = JSON.parse(document.getElementById('trace-data').textContent);
+const FLOW = JSON.parse(document.getElementById('flow-data').textContent);
 const GPRS = __GPRS__, FLAGS = __FLAGS__, SSEGS = __SEGS__;
 const BLOCKS = __BLOCKS__, GLYPHS = __GLYPHS__;
 const BLABEL = Object.fromEntries(BLOCKS.map(b=>[b[0], {label:b[1], sub:b[2]}]));
@@ -1197,6 +1242,203 @@ function srcPane(s){
   }
 }
 
+/* ---------------- the flow diagram (control-flow graph) ----------------
+   Every coordinate, path string and font size was computed at BUILD time by
+   cfg.py - this function only injects them. Two orderings of the same blocks:
+   next-execution-order and as-it-lies-in-memory.
+
+   The point of the diamonds is not decoration: each conditional's target is
+   known, so the edge the CPU actually took is solid and the road not taken is
+   greyed. `taken`/`nottaken` are measured by comparing the branch target with
+   the address of the next executed instruction, so the picture states a fact
+   about this run rather than what the ISA permits in general. */
+let FLOW_OPEN = false, FLOW_MODE = 'exec', FLOW_FIT = false;
+const EDGE_COL = {taken:'#3fb950', nottaken:'#8b949e', alt:'#484f58',
+                  call:'#58a6ff', jmp:'#bc8cff', hidden:'#30363d',
+                  gap:'#f85149', outside:'#6e7681'};
+const EDGE_LBL = {taken:'taken', nottaken:'not taken', alt:'the other way',
+                  call:'call', jmp:'jump', hidden:'(trace hand-off)',
+                  gap:'trace gap', outside:'not in trace'};
+
+function flowToggle(force){
+  FLOW_OPEN = (force === undefined) ? !FLOW_OPEN : !!force;
+  const host = document.getElementById('flowhost');
+  const btn  = document.getElementById('flow-toggle');
+  host.classList.toggle('open', FLOW_OPEN);
+  if (btn) btn.classList.toggle('on', FLOW_OPEN);
+  try { localStorage.setItem('flow', FLOW_OPEN ? '1' : '0'); } catch (e) {}
+  if (FLOW_OPEN) { renderFlow(); flowMark(cur); }
+}
+
+function hsl(h, s, l){ return 'hsl(' + h + ' ' + s + '% ' + l + '%)'; }
+
+function renderFlow(){
+  const v = FLOW.views[FLOW_MODE], g = v.geom;
+  const band = {}, rowAt = {};
+  FLOW.blocks.forEach(b => band[b.id] = b);
+  v.rows.forEach(r => rowAt[r.i] = r);
+
+  /* edges first, so the boxes sit on top of the lines */
+  let paths = '';
+  v.edges.forEach(e => {
+    if (e.kind === 'outside') {
+      paths += '<g><rect x="' + (e.x + 6) + '" y="' + (e.y + 4) + '" width="150"'
+        + ' height="20" rx="4" fill="#161b22" stroke="#30363d"'
+        + ' stroke-dasharray="3 2"/>'
+        + '<text x="' + (e.x + 12) + '" y="' + (e.y + 18) + '" font-size="8.5"'
+        + ' fill="#6e7681">' + esc(EDGE_LBL[e.kind] || e.kind) + '</text></g>';
+      return;
+    }
+    const col = e.back ? '#ffa657' : (EDGE_COL[e.kind] || '#8b949e');
+    const dash = (e.kind === 'nottaken' || e.kind === 'alt' || e.kind === 'hidden'
+                  || e.kind === 'gap') ? ' stroke-dasharray="4 3"' : '';
+    paths += '<path d="' + e.d + '" fill="none" stroke="' + col + '"'
+      + ' stroke-width="' + (e.kind === 'alt' ? 1 : 1.5) + '"' + dash
+      + ' marker-end="url(#ar' + col.slice(1) + ')"/>';
+    if (e.label && e.kind !== 'hidden') {
+      paths += '<text x="' + e.lx + '" y="' + e.ly + '" font-size="7.5" fill="'
+        + col + '" opacity=".85">' + esc(e.label) + '</text>';
+    }
+  });
+
+  /* address gaps: code the trace never entered, drawn where it sits */
+  let gaps = '';
+  v.gaps.forEach(gp => {
+    gaps += '<line x1="' + gp.x + '" y1="' + gp.y + '" x2="' + (gp.x + 200)
+      + '" y2="' + gp.y + '" stroke="#30363d" stroke-dasharray="2 3"/>'
+      + '<text x="' + (gp.x + 6) + '" y="' + (gp.y - 4) + '" font-size="7.5"'
+      + ' fill="#4d5566">&#8212; ' + gp.nbytes + ' bytes not in this trace &#8212;</text>';
+  });
+
+  let bands = '';
+  v.blocks.forEach(b => {
+    const B = band[b.id];
+    const tip = B.lab_full + '   steps #' + B.first + '–#' + B.last
+              + '   0x' + B.addr0.toString(16) + '–0x'
+              + B.addr1.toString(16) + '   ' + B.steps.length + ' instructions';
+    bands += '<g><title>' + esc(tip) + '</title>'
+      + '<rect class="band" x="' + b.x + '" y="' + b.y + '" width="'
+      + b.w + '" height="' + b.h + '" rx="6" fill="' + hsl(B.hue, 45, 9)
+      + '" stroke="' + hsl(B.hue, 35, 26) + '"/>'
+      + '<text x="' + (b.x + 9) + '" y="' + (b.y + 12) + '" font-size="8.5" fill="'
+      + hsl(B.hue, 60, 64) + '">' + esc(B.lab) + '</text>'
+      + '<text x="' + (b.x + b.w - 8) + '" y="' + (b.y + 12)
+      + '" font-size="8" text-anchor="end" fill="' + hsl(B.hue, 25, 42)
+      + '">' + esc(B.rt) + '</text></g>';
+  });
+
+  let nodes = '';
+  v.rows.forEach(r => {
+    const R = FLOW.rows[r.i], st = T.steps[r.i];
+    const tip = '#' + r.i + '  0x' + R.addr.toString(16) + '  '
+              + R.text + '   ' + st.file_short + ':' + st.line;
+    const stroke = hsl(R.hue, 40, 32), fillc = hsl(R.hue, 30, 13);
+    let shape;
+    if (R.shape === 'diamond') {
+      /* a decision reads as a diamond only if the shape is left of the text,
+         otherwise the text has nowhere to go */
+      const cx = r.x + 15, cy = r.cy, k = 11.5;
+      shape = '<polygon points="' + cx + ',' + (cy - k) + ' ' + (cx + k) + ',' + cy
+        + ' ' + cx + ',' + (cy + k) + ' ' + (cx - k) + ',' + cy
+        + '" fill="#1b1410" stroke="#d29922" stroke-width="1.3"/>';
+      nodes += '<g class="row" data-i="' + r.i + '"><title>' + esc(tip) + '</title>'
+        + shape
+        + '<text x="' + (r.x + 32) + '" y="' + (r.cy + 3) + '" font-size="' + R.fs
+        + '" fill="#e3b341">' + esc(R.text) + '</text></g>';
+      return;
+    }
+    const flow = R.kind === 'flow';
+    shape = '<rect x="' + r.x + '" y="' + r.y + '" width="' + r.w + '" height="'
+      + r.h + '" rx="4" fill="' + fillc + '" stroke="' + stroke + '"'
+      + (flow ? ' stroke-width="1.4"' : '') + '/>';
+    nodes += '<g class="row" data-i="' + r.i + '"><title>' + esc(tip) + '</title>'
+      + shape
+      + '<text x="' + (r.x + r.w - 7) + '" y="' + (r.cy + 3) + '" font-size="7.5"'
+      + ' text-anchor="end" fill="' + hsl(R.hue, 20, 38) + '">#' + r.i + '</text>'
+      + '<text x="' + (r.x + 26) + '" y="' + (r.cy + 3) + '" font-size="' + R.fs
+      + '" fill="' + (flow ? '#c9d1d9' : hsl(R.hue, 40, 76)) + '">'
+      + esc(R.text) + '</text></g>';
+  });
+
+  const cols = Object.values(EDGE_COL).concat(['#ffa657']);
+  const defs = cols.map(c => '<marker id="ar' + c.slice(1) + '" viewBox="0 0 8 8"'
+    + ' refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto">'
+    + '<path d="M0,0 L8,4 L0,8 z" fill="' + c + '"/></marker>').join('');
+
+  document.getElementById('flowmount').innerHTML =
+    '<svg id="flowsvg" viewBox="0 0 ' + g.w + ' ' + g.h + '" width="' + g.w
+    + '" height="' + g.h + '" font-family="ui-monospace,Menlo,Consolas,monospace">'
+    + '<defs>' + defs + '</defs>' + paths + gaps + bands + nodes + '</svg>';
+
+  /* legend: files are colour keys, edges are line keys. The hue comes from the
+     emitted map, NOT from `blocks.find(b => b.file === f)`: a file can appear
+     only as a NON-first instruction of a block (an inlined macro reports the
+     header), so that lookup returns undefined and throws - which showed up as
+     an empty-message exception and an empty legend while the SVG drew fine. */
+  const files = FLOW.files.map(f => {
+    const hue = FLOW.hues[f];
+    const cnt = FLOW.rows.filter(r => T.steps[r.i].file_short === f).length;
+    return '<span><i style="background:' + hsl(hue, 55, 55) + '"></i>' + esc(f)
+      + ' <b>' + cnt + '</b></span>';
+  }).join('');
+  const lines = [['taken','#3fb950',0],['not taken','#8b949e',1],
+                 ['the other way','#484f58',1],['call','#58a6ff',0],
+                 ['jump','#bc8cff',0],['backwards (loop)','#ffa657',0]]
+    .map(x => '<span><i class="ln" style="border-top-color:' + x[1]
+      + (x[2] ? ';border-top-style:dashed' : '') + '"></i>' + x[0] + '</span>')
+    .join('');
+  document.getElementById('flow-legend').innerHTML =
+    '<b style="color:var(--fg)">' + FLOW.blocks.length + ' blocks</b> &#183; '
+    + FLOW.rows.length + ' instructions &#183; '
+    + FLOW.stats.taken + ' branches taken &#183; '
+    + FLOW.stats.nottaken + ' not taken &#183; '
+    + FLOW.stats.call_in + ' calls &#183; ' + FLOW.stats.ret + ' returns'
+    + '<br>' + files + '<br>' + lines;
+
+  const st = FLOW.stats;
+  document.getElementById('flow-stats').innerHTML =
+    'canvas <b>' + Math.round(g.w) + '&#215;' + Math.round(g.h) + '</b> in <b>'
+    + g.ncols + '</b> columns &#183; <b>' + v.edges.length + '</b> edges &#183; '
+    + '<b>' + v.back + '</b> point backwards here'
+    + (FLOW_MODE === 'addr' ? ' &#183; <b>' + v.gaps.length
+        + '</b> gaps in memory' : '');
+
+  document.getElementById('flow-exec').classList.toggle('on', FLOW_MODE === 'exec');
+  document.getElementById('flow-addr').classList.toggle('on', FLOW_MODE === 'addr');
+  fitFlow();
+}
+
+/* "fit width" is a scale on the viewBox, not a resize of the drawing: the
+   geometry stays at its natural size and the whole graph shrinks to fit. */
+function fitFlow(){
+  const svg = document.getElementById('flowsvg');
+  if (!svg) return;
+  const g = FLOW.views[FLOW_MODE].geom;
+  const avail = document.getElementById('flowbody').clientWidth - 28;
+  if (FLOW_FIT && avail < g.w) {
+    svg.setAttribute('width', avail);
+    svg.setAttribute('height', Math.round(g.h * avail / g.w));
+  } else {
+    svg.setAttribute('width', g.w);
+    svg.setAttribute('height', g.h);
+  }
+  document.getElementById('flow-fit').classList.toggle('on', FLOW_FIT);
+}
+
+/* keep the selected instruction's box marked while stepping with the panel open */
+function flowMark(i){
+  const svg = document.getElementById('flowsvg');
+  if (!svg) return;
+  svg.querySelectorAll('.row.sel').forEach(n => n.classList.remove('sel'));
+  const el = svg.querySelector('.row[data-i="' + i + '"]');
+  if (el) {
+    el.classList.add('sel');
+    const r = el.getBoundingClientRect(), h = document.getElementById('flowbody');
+    if (r.top < h.top + 20 || r.bottom > h.bottom - 20)
+      h.scrollTop += (r.top - h.top) - h.clientHeight / 2;
+  }
+}
+
 function select(i){
   cur = Math.max(0, Math.min(T.steps.length-1, i));
   document.querySelectorAll('.row').forEach(r=>r.classList.remove('sel'));
@@ -1204,6 +1446,7 @@ function select(i){
   const el = document.getElementById('row-'+cur) || document.getElementById('arow-'+cur);
   if(el){ el.classList.add('sel'); el.scrollIntoView({block:'nearest'}); }
   render();
+  if (FLOW_OPEN) flowMark(cur);
 }
 
 document.getElementById('m-sym').textContent   = T.meta.symbol;
@@ -1213,6 +1456,20 @@ document.getElementById('prev').onclick  = ()=>select(cur-1);
 document.getElementById('next').onclick  = ()=>select(cur+1);
 document.getElementById('die-toggle').onclick = () => dieToggle();
 document.getElementById('detail-toggle').onclick = () => detailToggle();
+/* flow diagram: open/close, the two orderings, fit, and click-a-box-to-select */
+document.getElementById('flow-toggle').onclick = () => flowToggle();
+document.getElementById('flow-close').onclick  = () => flowToggle(false);
+document.getElementById('flow-exec').onclick  = () => { FLOW_MODE = 'exec'; renderFlow(); flowMark(cur); };
+document.getElementById('flow-addr').onclick  = () => { FLOW_MODE = 'addr'; renderFlow(); flowMark(cur); };
+document.getElementById('flow-fit').onclick   = () => { FLOW_FIT = !FLOW_FIT; fitFlow(); };
+/* delegate: the SVG is replaced wholesale on every re-render, so a listener on
+   the element itself would die with it. One listener on the stable container. */
+document.getElementById('flowmount').addEventListener('click', e => {
+  const g = e.target.closest('.row');
+  if (!g) return;
+  select(+g.dataset.i);
+  e.preventDefault();
+});
 /* Click a line in the source pane to jump to an instruction that came from
    it. Only lines this trace actually executed are targets, so this cannot
    land on a line with no trace - and if several steps share a line, take the
@@ -1250,6 +1507,8 @@ document.addEventListener('keydown', e=>{
   if(e.key==='End') {select(T.steps.length-1);e.preventDefault();}
   if(e.key==='d'||e.key==='D'){dieToggle();e.preventDefault();}
   if(e.key==='i'||e.key==='I'){detailToggle();e.preventDefault();}
+  if(e.key==='f'||e.key==='F'){flowToggle();e.preventDefault();}
+  if(e.key==='Escape'){flowToggle(false);dieToggle(false);}
   if(e.key==='/'){                                        // jump to line
     e.preventDefault();
     const raw = prompt('Go to source line in ' + T.steps[cur].file_short + ':',
@@ -1316,7 +1575,8 @@ def _verify_js(outp):
     src = m.group(1)
     required = ["buildList", "showList", "execListHTML", "buildMemMap",
                 "select", "render", "diffs", "hwtTable", "dieMount", "svgOf",
-                "esc", "dieToggle", "dieNamesToggle", "srcPane", "detailToggle"]
+                "esc", "dieToggle", "dieNamesToggle", "srcPane", "detailToggle",
+                "flowToggle", "renderFlow", "fitFlow", "flowMark"]
     # a binding counts as defined whether it is a declaration or a const arrow
     defs = {f: (re.search(r'function\s+%s\s*\(' % re.escape(f), src)
                 or re.search(r'\b(?:const|let|var)\s+%s\s*=' % re.escape(f), src))
@@ -1338,9 +1598,14 @@ def main():
 
     trace = build(json.load(open(os.path.join(LAB, args.trace))),
                   os.path.join(LAB, args.vmlinux))
+    # the control-flow graph is derived from the SAME built steps, so a node in
+    # the diagram is the instruction the columns are showing - not a re-parse of
+    # the raw trace that could disagree with it.
+    flow = cfg.build_flow(trace["steps"])
 
     html = (HTML
             .replace("__TRACE__", json.dumps(trace, separators=(",", ":")).replace("</", "<\\/"))
+            .replace("__FLOW__", json.dumps(flow, separators=(",", ":")).replace("</", "<\\/"))
             .replace("__BLOCKS__", json.dumps(x86sem.BLOCKS))
             .replace("__GLYPHS__", json.dumps(x86sem.G))
             .replace("__GPRS__", json.dumps(GPRS))
