@@ -197,7 +197,12 @@ def build_flow(steps):
         need = len(txt) * CH * (fs / 10.0)
         if need > ROW_W - 34:                     # 22px step no. + 12px padding
             fs = max(FS_MIN, fs * (ROW_W - 34) / need)
-        rows.append(dict(i=nd["i"], addr=nd["addr"], text=txt, fs=round(fs, 2),
+        # `addr` is a HEX STRING, never a number: a kernel address is
+        # 0xffffffff81200040 = 1.8e19, far past Number.MAX_SAFE_INTEGER, so a
+        # JSON number makes the browser round it silently and every tooltip
+        # prints 0xffffffff81200000 for an address ending 040.
+        rows.append(dict(i=nd["i"], addr="0x%x" % nd["addr"], text=txt,
+                         fs=round(fs, 2),
                          kind=nd["kind"], cond=nd["cond"], mn=nd["mn"],
                          hue=0, shape="diamond" if nd["cond"] else "rect"))
 
@@ -223,6 +228,7 @@ def build_flow(steps):
         b["rt"] = "#%d–#%d" % (b["first"], b["last"])
         b["lab_full"] = lab
         b["lab"] = lab if len(lab) <= 30 else "…" + lab[-(30 - 1):]
+        b["addr0h"], b["addr1h"] = "0x%x" % b["addr0"], "0x%x" % b["addr1"]
 
     addr_order = sorted(blocks, key=lambda b: b["addr0"])
 
@@ -324,8 +330,15 @@ def build_flow(steps):
     assert views["exec"]["back"] == sum(1 for e in views["exec"]["edges"]
                                         if e["back"]), "back-edge count mismatch"
 
-    return dict(rows=rows, blocks=blocks, edges=edges, files=files, hues=fcol,
-                addr_order=[b["id"] for b in addr_order], stats=stats, views=views)
+    # Emit ONLY what the page reads. The raw `nodes` list (with int addr/tgt)
+    # and the raw `edges` were dead weight AND a hazard: an int address in the
+    # payload is a double once JSON.parse has it, so anything that later
+    # formatted one would print a rounded address with no error. The page gets
+    # hex strings and per-view geometry, nothing else.
+    KEEP = ("id", "first", "last", "file", "hue", "lab", "lab_full", "rt",
+            "addr0h", "addr1h", "steps")
+    return dict(rows=rows, blocks=[{k: b[k] for k in KEEP} for b in blocks],
+                files=files, hues=fcol, stats=stats, views=views)
 
 
 def _self_test(name, steps):
@@ -359,8 +372,18 @@ def _self_test(name, steps):
             assert e["d"].startswith("M"), f"{tag} edge {e['id']} has no path"
     assert f["views"]["exec"]["back"] == st["back"], "back-edge count mismatch"
     assert st["gap"] == 0, f"{st['gap']} unexplained gaps in {name}"
+    # A kernel address is ~1.8e19 and JSON numbers are doubles, so an address
+    # emitted as a number is rounded by the browser with no error anywhere.
+    # Assert the largest one in this trace appears NOWHERE in the payload.
+    import json as _json
+    blob = _json.dumps(f)
+    biggest = max(int(s["insn_parsed"]["addr"], 16) for s in steps)
+    assert str(biggest) not in blob, ("an address was serialised as a JSON "
+                                      "number: %d" % biggest)
+    assert all(isinstance(r["addr"], str) and r["addr"].startswith("0x")
+               for r in f["rows"]), "row addresses must be hex strings"
     print(f"=== {name}: {n} instructions -> {len(f['blocks'])} blocks, "
-          f"{len(f['edges'])} edges")
+          f"{len(f['views']['exec']['edges'])} edges")
     print(f"    {st}")
     for tag, v in f["views"].items():
         g = v["geom"]

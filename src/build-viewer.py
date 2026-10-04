@@ -1314,8 +1314,8 @@ function renderFlow(){
   v.blocks.forEach(b => {
     const B = band[b.id];
     const tip = B.lab_full + '   steps #' + B.first + '–#' + B.last
-              + '   0x' + B.addr0.toString(16) + '–0x'
-              + B.addr1.toString(16) + '   ' + B.steps.length + ' instructions';
+              + '   ' + B.addr0h + '–' + B.addr1h
+              + '   ' + B.steps.length + ' instructions';
     bands += '<g><title>' + esc(tip) + '</title>'
       + '<rect class="band" x="' + b.x + '" y="' + b.y + '" width="'
       + b.w + '" height="' + b.h + '" rx="6" fill="' + hsl(B.hue, 45, 9)
@@ -1330,7 +1330,7 @@ function renderFlow(){
   let nodes = '';
   v.rows.forEach(r => {
     const R = FLOW.rows[r.i], st = T.steps[r.i];
-    const tip = '#' + r.i + '  0x' + R.addr.toString(16) + '  '
+    const tip = '#' + r.i + '  ' + R.addr + '  '
               + R.text + '   ' + st.file_short + ':' + st.line;
     const stroke = hsl(R.hue, 40, 32), fillc = hsl(R.hue, 30, 13);
     let shape;
